@@ -1,0 +1,38 @@
+name: Suggest an idea
+description: Something Wingman could do, or do better
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Give it a short title above. English or Spanish is fine.
+        Ideas here are **public** — describe your situation in general terms, without company, client or
+        colleague names or meeting content.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would make Wingman more useful to you?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why does it matter — what would it help you do?
+  - type: dropdown
+    id: importance
+    attributes:
+      label: How much would this matter to you?
+      options:
+        - Nice to have
+        - I'd use it every week
+        - I can't use Wingman without it
+  - type: input
+    id: version
+    attributes:
+      label: Wingman version
+      placeholder: "0.7.0 (7)"
+  - type: input
+    id: system
+    attributes:
+      label: Mac and macOS
+      placeholder: "macOS 26.0, Apple M2, Mac14,2, 16 GB"

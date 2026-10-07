@@ -1,0 +1,98 @@
+name: Report a problem
+description: Something didn't work the way you expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Wingman! Give it a short title above, e.g. *Teams call wasn't detected*.
+        English or Spanish is fine.
+
+        Posts here are **public**: please don't paste meeting content, meeting titles or people's names —
+        describe the problem instead. Screenshots of the Wingman window show the transcript, the meeting
+        name and invitees, so crop or blur them first.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, and what Wingman did.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Wingman?
+      options:
+        - Recording or call detection
+        - Live transcript or languages
+        - After the call (review, speakers, saving)
+        - Speaker names
+        - Mute
+        - Calendar
+        - Notes, audio files or subtitles
+        - Transcribing a recording file
+        - Settings or permissions
+        - Install or first launch
+        - Something else
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language(s) spoken in the meeting
+      multiple: true
+      options:
+        - English
+        - Spanish
+        - English and Spanish mixed
+        - Another language
+  - type: dropdown
+    id: audio
+    attributes:
+      label: Audio setup
+      multiple: true
+      options:
+        - Mac speakers and built-in microphone
+        - Wired headphones
+        - AirPods or another Bluetooth headset
+        - USB headset or microphone
+        - Something else
+  - type: dropdown
+    id: callapp
+    attributes:
+      label: Call app
+      options:
+        - Microsoft Teams
+        - Zoom
+        - A call in the browser (Meet, Teams on the web…)
+        - No call (in person, or a recording file)
+        - Something else
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Sometimes
+        - Once so far
+  - type: input
+    id: version
+    attributes:
+      label: Wingman version
+      description: Filled in when you use "Send Feedback…" in Wingman (or see Settings → About).
+      placeholder: "0.7.0 (7)"
+  - type: input
+    id: system
+    attributes:
+      label: Mac and macOS
+      placeholder: "macOS 26.0, Apple M2, Mac14,2, 16 GB"
+  - type: textarea
+    id: log
+    attributes:
+      label: Log file and screenshots (optional, helps a lot)
+      description: |
+        Drag `wingman.log` here. "Send Feedback…" shows it in Finder; otherwise press Shift-⌘-G in Finder
+        and paste `~/Library/Logs/Wingman`. It records what the app did — never audio or what was said —
+        but it does include your audio devices' names (like "Ana's AirPods"), so have a look first.

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report something privately
+    url: https://github.com/daniel-wing/wingman-beta/security/advisories/new
+    about: For a security problem, or anything you'd rather not post publicly.
