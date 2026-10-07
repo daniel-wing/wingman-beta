@@ -1,23 +1,24 @@
-Wingman beta
-Copyright (c) 2026 danielwing. All rights reserved.
+MIT License
 
-You may download the beta builds published in this repository and use them on
-your own Macs, free of charge, to try Wingman and give feedback. This permission
-lasts for the beta and ends when the author announces the end of the beta or
-withdraws it. If you send feedback or suggestions, the author may use them
-freely, without any obligation to you.
+Copyright (c) 2026 Daniel Wing
 
-You may not redistribute, sell, rent or sublicense the software, or modify,
-decompile or reverse-engineer it, except where the law allows this despite this
-restriction.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-The software is provided "as is", without warranty of any kind, express or
-implied, including fitness for a particular purpose. It is beta software and may
-contain bugs, fail to record, or transcribe incorrectly. In no event shall the
-author be liable for any claim, damages or other liability arising from its use.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-You are responsible for following the laws on recording conversations that apply
-to you and the other participants, including getting their consent.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
-Third-party components included in or downloaded by the software are licensed
-under their own terms; see THIRD_PARTY_NOTICES.md.
+Third-party libraries and models used by Wingman are licensed under their own
+terms; see THIRD_PARTY_NOTICES.md.

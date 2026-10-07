@@ -2,11 +2,12 @@
 
 **Meeting transcripts that never leave your Mac.**
 
-Wingman is a small Mac app that lives in your menu bar. When a Teams, Zoom or
-browser call starts, it asks whether to record (or records automatically, if you
+Wingman is a small Mac app that lives in your menu bar. When a Teams, Zoom, Google
+Meet or other browser call starts, it asks whether to record (or records automatically, if you
 choose). You see a live transcript while people talk, and when the call ends it saves
 the full transcript — with who said what — plus the audio. Everything happens on your
-Mac: no account, no cloud, and no bot joining your meeting.
+Mac: no account, no cloud, and no bot joining your meeting. It's free and
+[open source](#license).
 
 *Wingman writes transcripts, not summaries (yet).*
 
@@ -15,7 +16,7 @@ Mac: no account, no cloud, and no bot joining your meeting.
 >
 > **[Install](#install) · [Send feedback](#feedback) · [How it works](#how-it-works)**
 
-**En español:** Wingman graba y transcribe tus llamadas de Teams, Zoom o del navegador
+**En español:** Wingman graba y transcribe tus llamadas de Teams, Zoom, Google Meet o del navegador
 en tu Mac, sin nube. Entiende español e inglés mezclados. Puedes enviar tus
 comentarios en español. Si tu Mac está en español, los botones de la instalación se
 llaman *Configuración del Sistema* (o *Ajustes del Sistema*) → *Privacidad y
@@ -28,9 +29,10 @@ Wingman la lee desde la app Calendario ([pasos](#connect-your-work-calendar)).
 
 ## What it does
 
-- **Starts with your calls.** When Microsoft Teams, Zoom or a call in your browser
-  starts using the microphone, Wingman asks whether to record it — or records
-  automatically, or ignores it; you choose per app. Recording stops when the call ends.
+- **Starts with your calls.** When Microsoft Teams, Zoom, Google Meet or another call in
+  your browser starts using the microphone, Wingman asks whether to record it — or
+  records automatically, or ignores it; you choose per app. Recording stops when the
+  call ends. ([How Google Meet is recognized](#google-meet).)
 - **Live transcript.** Read along as people talk. English and Spanish can be mixed in
   the same meeting, even in the same sentence ("vamos a revisar el *dashboard* de
   Power BI"). Portuguese has had some testing; French, German and Italian are
@@ -109,12 +111,16 @@ audio. Lines the model wasn't confident about are marked *(unclear)*.
   about 0.6 GB for live transcription, 1.5 GB for the language review and a few MB for
   voice detection and telling voices apart. If the review model can't be used, macOS may
   download its own speech files from Apple instead. After that, Wingman works offline.
+- **…and to check for updates**, about once a day: it reads a small file attached to this
+  page's latest release and, when there's a new version, downloads it from here
+  ([updates](#updates)). Settings → About → *Install updates automatically* turns that off.
 - **Feedback is up to you.** "Send Feedback…" opens a form in your browser; you see
   everything and send it yourself.
 - **Your files stay private.** When Wingman creates `~/Meeting Notes`, only your user
   account can open it. Wingman's log (`~/Library/Logs/Wingman/wingman.log`) records what
-  the app did — devices, permissions, timings — never audio or what was said. It does
-  include your audio devices' names (like "Ana's AirPods").
+  the app did — devices, permissions, timings, your Mac's model and macOS version, and for
+  Google Meet only whether it found a call (never tab titles or meeting links) — never
+  audio or what was said. It does include your audio devices' names (like "Ana's AirPods").
 - **Voiceprints are kept only if you turn on *Recognize people***, and only on your Mac.
 
 ### Please record responsibly
@@ -133,16 +139,17 @@ people*, some places also require consent to keep someone's voiceprint.
   (about 45 MB per hour of meetings)
 - Optional: your calendar in the Mac's **Calendar** app, to name meetings
   ([work calendars](#connect-your-work-calendar))
-- Works with **Microsoft Teams** (the new app) and **Zoom**. Calls in a browser
-  (Chrome, Safari, Edge, Firefox, Arc, Brave, Opera — Google Meet, Teams on the web…)
-  are detected too, but have had little testing so far.
+- Works with **Microsoft Teams** (the new app), **Zoom**, and **Google Meet** in Chrome or
+  the Google Meet app. Edge, Brave, Arc and Opera recognize Meet the same way but have
+  had less testing; in Safari and Firefox, Meet counts as a browser call. Other calls in
+  a browser (Teams on the web…) are detected too, but have had little testing so far.
 - The app is in English; meetings can be in English, Spanish and the other languages above.
 
 ## Install
 
 1. Open the [latest release](https://github.com/daniel-wing/wingman-beta/releases/latest)
-   and, under **Assets**, click **Wingman-0.7.0.zip** (ignore *Source code* — it only
-   contains this page).
+   and, under **Assets**, click the **Wingman-….zip** file (not *Source code*, which is
+   Wingman's code — see [License](#license)).
 2. Open your **Downloads** folder. If you already see the Wingman app, your browser
    unzipped it for you; otherwise double-click the zip. Drag **Wingman** into
    **Applications**.
@@ -165,6 +172,19 @@ people*, some places also require consent to keep someone's voiceprint.
 >
 > **Work Mac?** If your company manages your Mac, *Open Anyway* or the audio
 > permissions may be blocked or need your IT team.
+
+### Updates
+
+From version 0.8.0 on, Wingman keeps itself up to date. About once a day it checks this
+page's latest release; when there's a new version, it downloads it in the background
+and installs it the next time Wingman quits or your Mac restarts — or right away with
+**Restart to Install Wingman …** in its menu. It never interrupts a recording. Updates
+are checked against the project's signature, so only versions published here install,
+and they don't need *Open Anyway*. To check yourself: menu bar icon → **Check for
+Updates…**; to switch it off: Settings → About.
+
+Still on 0.7.0? Install the latest version by hand once (the steps above); updates are
+automatic after that.
 
 ### Connect your work calendar
 
@@ -214,7 +234,7 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
 | Microphone | Hears you | Needed |
 | Notifications | Asks *Record this call?* and shows a Stop button. Without it, Wingman opens its window instead. | Recommended |
 | Calendar | Names meetings and lists invitees. Only reads, from the calendars in the Mac's Calendar app — no Microsoft or Google sign-in ([work calendar](#connect-your-work-calendar)). | Optional |
-| Accessibility | Only to follow your mute in the Teams or Zoom app: it reads their mute button (and asks Teams to make it readable), and never clicks or types | Optional |
+| Accessibility | To tell a Google Meet call from other browser use: it reads Chrome's tab titles and address bar ([how](#google-meet)). And to follow your mute in the Teams or Zoom app: it reads their mute button (and asks Teams to make it readable). It never clicks or types, and saves nothing it reads. | Optional; needed for Google Meet |
 
 **Clicked "Don't Allow"?** System Settings → Privacy & Security → Microphone (or Screen
 & System Audio Recording → *System Audio Recording Only*) → switch Wingman on.
@@ -229,7 +249,8 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
 - **Start and stop by hand:** menu bar icon → **Start Recording**, or **⌃⌥⌘R** from any
   app. Use this for apps Wingman doesn't detect (Webex, Slack, FaceTime…); recordings
   you start yourself don't stop on their own. In a browser, any use of the microphone
-  for a few seconds counts as a call, so *Ask me first* is safest there.
+  for a few seconds counts as a call, so *Ask me first* is safest there. Google Meet
+  has its own setting.
 - **Mute Wingman:** **⌃⌥M** from any app. Your voice is left out of the transcript *and*
   the audio until you press it again or quit Wingman (the menu-bar icon shows a crossed-out mic). Or
   let it follow your Teams/Zoom mute (Settings → Calls).
@@ -246,6 +267,28 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
   the meeting name.
 - **Tip:** headphones give the cleanest transcript.
 
+### Google Meet
+
+Wingman recognizes a Meet call from what Chrome itself shows, never from the page:
+
+- **A Chrome tab** whose title has a meeting code (*Meet – abc-defg-hij*) and Chrome's
+  *Microphone recording* note. When that tab is the one in front, Wingman also checks
+  the address bar (`meet.google.com/abc-defg-hij`) and follows your Google Meet setting —
+  *Record automatically* included.
+- **The Google Meet app** (installed from Chrome), by its *This page is accessing your
+  microphone* indicator.
+- The **waiting room** before you join already uses your mic, so it counts, as Teams'
+  does.
+- If the Meet tab is **behind other tabs** when the call starts, Wingman can only go by
+  its title, so it asks first (*Google Meet call?*) — even if Meet is set to record
+  automatically. It never asks twice about the same call.
+- When you leave, the note is saved within a few seconds. Two meetings at once are two
+  calls; joining another meeting in the same tab starts a new note.
+- The note is named from the calendar event with that Meet link.
+- This needs **Accessibility**. Wingman reads the tab titles and address bar only while
+  the browser is using the mic, keeps them in memory, and never saves or logs them.
+  Without Accessibility, Meet counts as a browser call.
+
 ## Known limitations
 
 - Mac with Apple silicon and macOS 26 only.
@@ -254,19 +297,31 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
   Mac is labeled as you; in an imported recording, you're one of the "Them" speakers.
 - On laptop speakers your microphone also hears the call. Most of that echo is removed,
   but some repeated lines can remain — headphones avoid it.
-- Following your mute works with the Teams and Zoom apps, not with calls in a browser,
-  and has been tested with their English versions. If you use them in another language,
+- Google Meet has been tested in Chrome and the Google Meet app with Chrome in English.
+  With Chrome in another language, Wingman can't read the tab's *recording* note yet,
+  so it asks instead of recording automatically. A Meet tab behind other tabs is
+  recognized by its title only, so Wingman asks first.
+- Following your mute works with the Teams and Zoom apps, not yet with Google Meet or
+  other calls in a browser (mute Wingman with ⌃⌥M), and has been tested with their English versions. If you use them in another language,
   check that Wingman's *You're muted* line matches, and tell me if it doesn't.
 - While Wingman is finishing a meeting, it can't start recording the next one; it offers
   the new call when done.
 - Taking AirPods in and out during a call can split the meeting into two notes.
-- Each new version needs **Open Anyway** once until the app is notarized.
+- Installing Wingman the first time needs **Open Anyway** once, until it's notarized;
+  updates install without it.
 
 ## Feedback
 
 Every report helps, even "this confused me". **Puedes escribir en español.**
 
-- **Easiest:** Wingman's menu bar icon → **Send Feedback…** → *Report a Problem* or
+- **A problem with a call** (not detected, not recorded, didn't stop…): Wingman's menu
+  bar icon → **Report a Problem with a Call** → pick the call (or click the speech-bubble
+  button next to *Show Note* after it). Write one sentence about what went wrong; Wingman
+  adds what it saw and did during that call, with its settings and permissions — no
+  meeting titles, links, names or what was said, and you see all of it first. Then
+  **Copy Report** and paste it into a message to me, or open the GitHub form with it
+  filled in. No log file or times needed.
+- **Anything else:** Wingman's menu bar icon → **Send Feedback…** → *Report a Problem* or
   *Suggest an Idea*. A form opens in your browser with your Wingman version and Mac
   already filled in, and a Finder window shows Wingman's log: drag it into the form's
   *Log file* box (have a look at it first — it lists your audio devices' names).
@@ -275,7 +330,8 @@ Every report helps, even "this confused me". **Puedes escribir en español.**
 - **Something you'd rather not post publicly** (like a security problem)?
   [Report it privately](https://github.com/daniel-wing/wingman-beta/security/advisories/new).
 
-A free GitHub account is needed. Issues here are **public**, so please don't paste
+The GitHub forms need a free GitHub account (a copied report doesn't). Want to fix
+something yourself? See [CONTRIBUTING.md](CONTRIBUTING.md). Issues here are **public**, so please don't paste
 meeting content, meeting titles or people's names, and crop or blur screenshots of the
 Wingman window.
 
@@ -305,4 +361,7 @@ models and Silero's voice detector. Full credits and licenses:
 
 ## License
 
-Wingman is free to use during the beta. It is not open source; see [LICENSE](LICENSE).
+Wingman is free and open source under the [MIT license](LICENSE): use it, change it and
+share it. The code is in this repository — [CONTRIBUTING.md](CONTRIBUTING.md) explains
+how to build it and send improvements. The libraries and models it uses keep their own
+licenses ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).

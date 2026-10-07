@@ -66,7 +66,8 @@ body:
       options:
         - Microsoft Teams
         - Zoom
-        - A call in the browser (Meet, Teams on the web…)
+        - Google Meet (Chrome or the Google Meet app)
+        - Another call in the browser (Teams on the web…)
         - No call (in person, or a recording file)
         - Something else
   - type: dropdown
@@ -93,6 +94,6 @@ body:
     attributes:
       label: Log file and screenshots (optional, helps a lot)
       description: |
-        Drag `wingman.log` here. "Send Feedback…" shows it in Finder; otherwise press Shift-⌘-G in Finder
+        "Report a Problem with a Call" in Wingman's menu fills this in for one call. Otherwise drag `wingman.log` here. "Send Feedback…" shows it in Finder; otherwise press Shift-⌘-G in Finder
         and paste `~/Library/Logs/Wingman`. It records what the app did — never audio or what was said —
         but it does include your audio devices' names (like "Ana's AirPods"), so have a look first.

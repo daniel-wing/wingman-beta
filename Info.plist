@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>local.wingman.app</string>
+    <key>CFBundleName</key>
+    <string>Wingman</string>
+    <key>CFBundleDisplayName</key>
+    <string>Wingman</string>
+    <key>CFBundleExecutable</key>
+    <string>Wingman</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.8.0</string>
+    <key>CFBundleVersion</key>
+    <string>8</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Wingman transcribes what you say during a meeting, on this Mac.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Wingman transcribes what the other people on a call say, on this Mac.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Wingman names meetings after the event on your calendar and offers the invited people as speaker names. It only reads your calendar.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Wingman can use Apple's on-device speech recognition to double-check lines after a meeting, on this Mac.</string>
+    <!-- Automatic updates (Sparkle, direct-download build): the feed is attached to
+         the public repo's latest release; SUPublicEDKey is the project's update key
+         (empty: the build doesn't update itself). -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/daniel-wing/wingman-beta/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>8SWCYkyLM9tXaBFvEB+aUbFbsTTxIzFUCh7PXykcp2o=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+</dict>
+</plist>
