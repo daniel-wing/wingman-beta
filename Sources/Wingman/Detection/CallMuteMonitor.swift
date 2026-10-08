@@ -234,6 +234,10 @@ actor AXProbe {
             self.pid = pid
             reset()
         }
+        // Its window was minimized: that copy goes stale, so find the live one.
+        if let control, app == .teams, AXTree.inMinimizedWindow(control) {
+            self.control = nil
+        }
         if let control {
             switch AXTree.label(control, for: app) {
             case .success(let label):
@@ -348,13 +352,26 @@ enum AXTree {
         case .zoom: bundles = ["us.zoom.xos"]
         case .meet, .browser: return nil
         }
+        // Teams can stop being a regular (Dock) app while it's minimized to its
+        // floating mini window; it's still the same call.
         for bundle in bundles {
-            if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle)
-                .first(where: { $0.activationPolicy == .regular }) {
-                return running.processIdentifier
+            let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle)
+            if let app = running.first(where: { $0.activationPolicy == .regular })
+                ?? running.first(where: { $0.activationPolicy != .prohibited }) {
+                return app.processIdentifier
             }
         }
         return nil
+    }
+
+    static func isMinimized(_ window: AXUIElement) -> Bool {
+        (value(window, kAXMinimizedAttribute) as? Bool) == true
+    }
+
+    /// Whether a control sits in a minimized window, where Teams stops updating it.
+    static func inMinimizedWindow(_ element: AXUIElement) -> Bool {
+        guard let window = value(element, kAXWindowAttribute), CFGetTypeID(window) == AXUIElementGetTypeID() else { return false }
+        return isMinimized(window as! AXUIElement)
     }
 
     static func value(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
@@ -388,7 +405,9 @@ enum AXTree {
     static func findMuteControl(in application: AXUIElement, for app: CallApp) -> AXUIElement? {
         switch app {
         case .teams:
-            let windows = (value(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+            // A minimized meeting window keeps a copy of the mute button that stops
+            // updating (the floating mini window has the live one), so skip it.
+            let windows = ((value(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []).filter { !isMinimized($0) }
             var fallback: AXUIElement?
             for window in windows {
                 var visited = 0

@@ -11,6 +11,35 @@ import Testing
         (0..<256).map { Float(sin(Double($0 * (seed + 1)))) }
     }
 
+    @Test func forgettingOnlyShowsAsDoneOnceItsOnDisk() throws {
+        // The review's reproduction: a folder Wingman can't write to.
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("wingman-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let file = folder.appendingPathComponent("voices.json")
+        let library = VoiceLibrary(file: file)
+        library.learn("Ana", voiceprint: voice(1))
+        library.learn("Bruno", voiceprint: voice(2))
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path)
+
+        library.forget(library.people[0])
+        #expect(library.people.count == 2)  // still listed: forgetting again retries
+        #expect(library.problem != nil)
+        library.forgetEveryone()
+        #expect(library.people.count == 2)
+        #expect(library.problem != nil)
+        #expect(VoiceLibrary(file: file).people.count == 2)  // what's on disk, as shown
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        library.forgetEveryone()
+        #expect(library.people.isEmpty)
+        #expect(library.problem == nil)
+        #expect(VoiceLibrary(file: file).people.isEmpty)
+    }
+
     @Test func knownVoiceIsRecognizedWithoutInvitees() {
         let library = VoiceLibrary(file: file)
         library.learn("Ana", voiceprint: voice(1))
@@ -175,5 +204,42 @@ import Testing
         let redacted = Log.redacted(message)
         #expect(!redacted.contains("Acme"))
         #expect(redacted.contains("Code=640"))
+    }
+
+    @Test func punctuationInMeetingNamesDoesntLeakThem() {
+        // The review's reproduction, and names with brackets, apostrophes and "(2)".
+        for name in ["14-30 Acquisition, SecretTarget", "14-30 (2) Project Falcon", "09-00 [External] Acme buyout",
+                     "10-00 Bob's exit talk", "11-00 Plan; Phase 2"] {
+            let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+            let message = "Error Domain=NSCocoaErrorDomain Code=513 UserInfo={NSFilePath=/x/Meeting Notes/2026-10-07/\(name).md, NSURL=file:///x/Meeting%20Notes/2026-10-07/\(encoded)-me.wav}"
+            let redacted = Log.redacted(message)
+            for secret in ["SecretTarget", "Falcon", "Acme", "exit talk", "Phase"] {
+                #expect(!redacted.contains(secret), "\(name): \(redacted)")
+            }
+            #expect(redacted.contains("Code=513"))
+        }
+    }
+
+    @Test func errorsAreLoggedByDomainAndCode() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: 513, userInfo: [
+            NSFilePathErrorKey: "/x/Meeting Notes/2026-10-07/14-30 Secret.md",
+            NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 13),
+        ])
+        #expect(Log.describe(error) == "NSCocoaErrorDomain 513 (NSPOSIXErrorDomain 13)")
+    }
+}
+
+@MainActor
+@Suite struct FileNameTests {
+    @Test func namesFitTheFileNameLimitInBytes() {
+        let prefix = "17-07 (2) "
+        for name in [String(repeating: "会", count: 80), String(repeating: "👨‍👩‍👧‍👦", count: 80),
+                     String(repeating: "e\u{301}", count: 80), String(repeating: "a", count: 200)] {
+            let safe = Recorder.fileSafe(name)
+            #expect(!safe.isEmpty)
+            #expect((prefix + safe + "-them.wav").utf8.count <= 255, "\(safe.utf8.count) bytes")
+        }
+        #expect(Recorder.fileSafe("Weekly: sync/review") == "Weekly  sync review")
+        #expect(Recorder.fileSafe("  .Plan.  ") == "Plan")
     }
 }

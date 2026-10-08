@@ -1,5 +1,30 @@
 # Release notes
 
+## 0.8.1 — safer by default
+
+Fixes from an outside review of 0.8.0, mostly about privacy and not losing a meeting:
+
+- **Following your Teams mute works when Teams is minimized.** Teams then keeps a floating
+  mini window with its own mute button, and the button in the minimized window stops
+  updating; Wingman could read that stale one and miss that you'd muted. It now follows the
+  live button.
+- **No more silent saving failures.** If the note can't be saved (a full disk, a missing
+  folder), Wingman says so and offers *Save Note As…*; "Meeting saved" only appears when it
+  is. Very long meeting names in Chinese, Japanese or emoji no longer break saving.
+- **Real replies aren't mistaken for echo.** On laptop speakers only clear repeats are
+  removed; similar lines are kept and marked *(possible echo)* — "We should not deploy
+  today" no longer disappears.
+- **A line the speech engine fails on is kept**, marked *(incomplete)*, instead of vanishing.
+- **Notifications act only on the call they're about**, and clicking a banner opens
+  Wingman instead of starting a recording — only the *Record* button records.
+- **Forgetting a voice says so only when it's done**, and discarding a recording says if a
+  file couldn't go to the Trash.
+- Meeting names can't leak into the log through punctuation; temporary audio lives in a
+  private folder that's cleaned up after a crash; the call-audio rate check no longer
+  misreads a pause; short microphone blips in a browser no longer start a call early; the
+  in-app notices now say MIT; VoiceOver labels for the record and mute state.
+- This is the first update installed by Wingman itself (from 0.8.0).
+
 ## 0.8.0 — Google Meet, open source, automatic updates
 
 - **Wingman is open source** (MIT license): the code is now in the

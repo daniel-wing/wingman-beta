@@ -312,6 +312,36 @@ import Testing
         let safari = "com.apple.Safari|300"
         #expect(started(d.run(0, 3, [safari: .unavailable])).map(\.app) == [.browser])
     }
+
+    // The review's interrupted sequence: seen at 0, gone 1–3, back at 4.
+    @Test func anInterruptedStartBeginsAgainForEveryKind() {
+        var teams = Driver()
+        _ = teams.poll(0, apps: [.teams])
+        _ = teams.run(1, 3)
+        #expect(started(teams.run(4, 6, apps: [.teams])).isEmpty)
+        #expect(started(teams.run(7, 7, apps: [.teams])).map(\.app) == [.teams])
+
+        let safari = "com.apple.Safari|300"
+        var browser = Driver()
+        _ = browser.poll(0, [safari: .unavailable])
+        _ = browser.run(1, 3)
+        #expect(started(browser.run(4, 6, [safari: .unavailable])).isEmpty)
+        #expect(started(browser.run(7, 7, [safari: .unavailable])).map(\.app) == [.browser])
+
+        var meet = Driver()
+        _ = meet.poll(0, [chrome: .complete([self.meet("aaa-aaaa-aaa")])])
+        _ = meet.run(1, 3)
+        #expect(started(meet.run(4, 6, [chrome: .complete([self.meet("aaa-aaaa-aaa")])])).isEmpty)
+        #expect(started(meet.run(7, 7, [chrome: .complete([self.meet("aaa-aaaa-aaa")])])).map(\.app) == [.meet])
+    }
+
+    @Test func aMeetingUnseenSinceItsFirstReadingDoesntStart() {
+        var d = Driver()
+        _ = d.poll(0, [chrome: .complete([meet("aaa-aaaa-aaa")])])
+        // The browser keeps the mic, but its tabs can't be read.
+        #expect(started(d.run(1, 5, [chrome: .unavailable])).allSatisfy { $0.app != .meet })
+        #expect(started(d.run(6, 6, [chrome: .complete([meet("aaa-aaaa-aaa")])])).map(\.app) == [.meet])
+    }
 }
 
 // MARK: - Offers, settings, calendar

@@ -93,8 +93,10 @@ minute to tidy up:
 - **Who spoke.** The call audio is split into individual voices, so "Them" becomes
   "Them 1", "Them 2"… With *Recognize people* on, people you've named before are
   suggested or named automatically.
-- **Echo clean-up.** On laptop speakers your microphone also hears the call; lines that
-  are just that echo are removed.
+- **Echo clean-up.** On laptop speakers your microphone also hears the call. A line of
+  yours that clearly repeats theirs, word for word and right after it, is removed; one
+  that's only similar (*"We should **not** deploy today"*) is kept and marked *(possible
+  echo)*, so a real reply is never lost. With headphones nothing is filtered.
 - **The audio:** one file with both sides mixed, to play back any moment, plus your voice
   and the call as separate tracks.
 
@@ -121,6 +123,10 @@ audio. Lines the model wasn't confident about are marked *(unclear)*.
   the app did — devices, permissions, timings, your Mac's model and macOS version, and for
   Google Meet only whether it found a call (never tab titles or meeting links) — never
   audio or what was said. It does include your audio devices' names (like "Ana's AirPods").
+- **Audio is only kept if you want it.** To transcribe a meeting Wingman records its audio
+  while it lasts. With *Save meeting audio* off, that audio sits in a private folder
+  (`~/Library/Caches/Wingman`) and is deleted once the note is saved, or at the next
+  launch if Wingman was stopped mid-meeting.
 - **Voiceprints are kept only if you turn on *Recognize people***, and only on your Mac.
 
 ### Please record responsibly
@@ -295,8 +301,8 @@ Wingman recognizes a Meet call from what Chrome itself shows, never from the pag
 - Tested most with English and Spanish.
 - Only the call audio is split into speakers. In an in-person meeting everyone near your
   Mac is labeled as you; in an imported recording, you're one of the "Them" speakers.
-- On laptop speakers your microphone also hears the call. Most of that echo is removed,
-  but some repeated lines can remain — headphones avoid it.
+- On laptop speakers your microphone also hears the call. Clear repeats are removed, but
+  similar lines stay, marked *(possible echo)* — headphones avoid it.
 - Google Meet has been tested in Chrome and the Google Meet app with Chrome in English.
   With Chrome in another language, Wingman can't read the tab's *recording* note yet,
   so it asks instead of recording automatically. A Meet tab behind other tabs is
@@ -345,7 +351,8 @@ Return) and move it to the Trash:
 - `~/Library/Application Support/Wingman` — remembered voices and the review model
 - `~/Library/Application Support/FluidAudio/Models` — the speech models (if no other app
   uses FluidAudio, remove the whole `FluidAudio` folder)
-- `~/Library/Caches/local.wingman.app` — prepared copies of the models
+- `~/Library/Caches/local.wingman.app` — prepared copies of the models and downloaded updates
+- `~/Library/Caches/Wingman` — audio in use during a meeting (normally empty)
 - `~/Library/Logs/Wingman` — the log
 
 Optional, in Terminal: `defaults delete local.wingman.app` forgets Wingman's settings,

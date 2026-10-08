@@ -48,7 +48,7 @@ final class CallWatcher {
         }
         policies[.meet] = Self.meetPolicy(saved: saved) ?? policies[.meet]
         self.policies = policies
-        notifier.onAction = { [weak self] action in self?.handle(action) }
+        notifier.onAction = { [weak self] action, subject in self?.handle(action, about: subject) }
         recorder.onPhaseChange = { [weak self] old, new in self?.phaseChanged(from: old, to: new) }
     }
 
@@ -109,13 +109,11 @@ final class CallWatcher {
             Log.write("call ended: \(Self.describe(session))")
             note(session.id, "Call ended")
             if let i = reports.firstIndex(where: { $0.id == session.id }) { reports[i].ended = Date() }
-            if pendingCall?.id == session.id {
-                pendingCall = nil
-                notifier.withdrawAsk()
-            }
+            if pendingCall?.id == session.id { pendingCall = nil }
+            notifier.withdrawAsk(session.id)
             if deferredCall?.session.id == session.id { deferredCall = nil }
             if recorder.isRecording, recorder.callSessionID == session.id {
-                Task { await finish() }
+                Task { await stopRecording() }
             }
             answered.remove(session.id)
             offered.remove(session.id)
@@ -159,7 +157,7 @@ final class CallWatcher {
         guard let pending = pendingCall, pending.app == .browser, pending.browser == meet.browser else { return }
         answered.insert(pending.id)
         pendingCall = nil
-        notifier.withdrawAsk()
+        notifier.withdrawAsk(pending.id)
         #if !APP_STORE
         note(pending.id, "Question withdrawn: it turned out to be Google Meet", outcome: .notRecorded)
         #endif
@@ -178,7 +176,10 @@ final class CallWatcher {
             offered.insert(session.id)
             pendingCall = session
             Task {
-                if await notifier.isAuthorized {
+                let authorized = await notifier.isAuthorized
+                // Answered, ended or replaced while checking: don't ask about it any more.
+                guard pendingCall?.id == session.id else { return }
+                if authorized {
                     let title = recorder.useCalendar ? CalendarLookup.currentMeeting(meetCode: session.meetingCode)?.title : nil
                     notifier.askToRecord(session, meeting: title)
                 } else {
@@ -223,9 +224,9 @@ final class CallWatcher {
         }
         if case .finishing = old, new == .idle, let id = recordingReport {
             recordingReport = nil
-            note(id, recorder.currentNote == nil ? "No note saved" : "Note saved")
+            note(id, recorder.noteSaved ? "Note saved" : "The note couldn't be saved")
             if let warning = recorder.warning { note(id, "Warning shown: \(Log.redacted(warning))") }
-            if let i = reports.firstIndex(where: { $0.id == id }) { reports[i].note = recorder.currentNote }
+            if let i = reports.firstIndex(where: { $0.id == id }), recorder.noteSaved { reports[i].note = recorder.currentNote }
         }
         switch new {
         case .recording:
@@ -252,26 +253,41 @@ final class CallWatcher {
         }
     }
 
-    private func handle(_ action: Notifier.Action) {
+    /// A notification was answered. It names the call (Record, Ignore) or the
+    /// recording (Stop, Discard) it was about; a late answer about another one
+    /// does nothing.
+    private func handle(_ action: Notifier.Action, about subject: UUID?) {
         switch action {
-        case .record:
-            if let session = pendingCall {
+        case .record, .ignore:
+            guard let session = pendingCall, session.id == subject else {
+                Log.write("ignored a notification answer about an older call (\(action.rawValue))")
+                if let subject { notifier.withdrawAsk(subject) }
+                return
+            }
+            if action == .record {
                 note(session.id, "You chose Record")
                 Task { await record(session) }
-            }
-        case .ignore:
-            if let session = pendingCall {
+            } else {
                 answered.insert(session.id)
                 note(session.id, "You chose Ignore", outcome: .ignored)
+                pendingCall = nil
+                notifier.withdrawAsk(session.id)
             }
-            pendingCall = nil
-        case .stop:
-            Task { await finish() }
-        case .discard:
-            Task {
-                await recorder.discard()
-                notifier.withdrawRecording()
+        case .stop, .discard:
+            guard recorder.isRecording, recorder.recordingID == subject else {
+                Log.write("ignored a notification answer about an older recording (\(action.rawValue))")
+                return
             }
+            if action == .stop {
+                Task { await stopRecording() }
+            } else {
+                Task {
+                    await recorder.discard()
+                    notifier.withdrawRecording()
+                }
+            }
+        case .open:
+            showWindow?()
         }
     }
 
@@ -285,13 +301,14 @@ final class CallWatcher {
             answered.insert(session.id)
             note(session.id, "You chose Ignore", outcome: .ignored)
             pendingCall = nil
+            notifier.withdrawAsk(session.id)
         }
     }
 
     private func record(_ session: CallSession) async {
         answered.insert(session.id)
         pendingCall = nil
-        notifier.withdrawAsk()
+        notifier.withdrawAsk(session.id)
         switch recorder.phase {
         case .idle:
             break
@@ -318,19 +335,26 @@ final class CallWatcher {
         if detector?.isActive(session) == false {
             Log.write("\(session.app.callTitle) ended while recording was starting; stopping")
             note(session.id, "The call ended while recording was starting; stopped")
-            await finish()
+            await stopRecording()
             return
         }
         let name = recorder.meetingName.trimmingCharacters(in: .whitespaces)
-        notifier.announceRecording(session.app, meeting: name.isEmpty ? nil : name)
+        notifier.announceRecording(session.app, meeting: name.isEmpty ? nil : name, recording: recorder.recordingID)
     }
 
-    private func finish() async {
+    /// Stops the recording, however it was asked for — the call ending, a
+    /// notification, the window, the menu bar, the shortcut — and says whether
+    /// the meeting was saved. A stop already under way isn't announced twice.
+    func stopRecording() async {
+        guard recorder.isRecording else { return }
         notifier.withdrawRecording()
         await recorder.stop()
         // Read right away: a call waiting to be recorded may start next and clear the warning.
-        if let note = recorder.currentNote {
+        guard let note = recorder.currentNote else { return }
+        if recorder.noteSaved {
             notifier.announceSaved(note.deletingPathExtension().lastPathComponent, warning: recorder.warning)
+        } else {
+            notifier.announceNotSaved()
         }
     }
 

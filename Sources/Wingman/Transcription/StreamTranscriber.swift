@@ -17,6 +17,18 @@ struct TranscriptEvent: Sendable {
     let isFinal: Bool
     /// The model's confidence in `text`, 0…1.
     var confidence: Float = 1
+    /// Recognition failed: keep what was shown so far, marked incomplete.
+    var failed = false
+}
+
+/// Trouble a stream can't fix by itself, for the recorder to show.
+enum StreamProblem: Sendable {
+    /// The track's audio file couldn't be created or written (full disk, folder gone).
+    case audioFile(String)
+    /// The speech engine failed on several lines in a row.
+    case recognition
+    /// The voice detector keeps failing, so speech may go unnoticed.
+    case voiceDetection
 }
 
 /// Turns one audio stream (mic or system audio) into transcript lines.
@@ -43,7 +55,13 @@ actor StreamTranscriber {
     private let engine: ParakeetEngine
     private let vad: VadManager
     private let emit: @Sendable (TranscriptEvent) async -> Void
+    private let onProblem: (@Sendable (StreamProblem) async -> Void)?
     private let audioFile: AVAudioFile?
+    /// An audio file was asked for but couldn't be created.
+    private let audioFileMissing: Bool
+    private var audioProblemReported = false
+    private var recognitionFailures = 0
+    private var detectionFailures = 0
 
     private var vadState = VadStreamState.initial()
     private var pending: [Float] = []
@@ -67,16 +85,20 @@ actor StreamTranscriber {
         engine: ParakeetEngine,
         vad: VadManager,
         audioFileURL: URL?,
+        onProblem: (@Sendable (StreamProblem) async -> Void)? = nil,
         emit: @escaping @Sendable (TranscriptEvent) async -> Void
     ) {
         self.speaker = speaker
         self.engine = engine
         self.vad = vad
         self.emit = emit
-        self.audioFile = audioFileURL.flatMap {
+        self.onProblem = onProblem
+        let file = audioFileURL.flatMap {
             try? AVAudioFile(forWriting: $0, settings: Resampler.outputFormat.settings,
                              commonFormat: .pcmFormatFloat32, interleaved: false)
         }
+        self.audioFile = file
+        self.audioFileMissing = audioFileURL != nil && file == nil
     }
 
     /// What a stream is fed: audio, or a request to erase the latest audio.
@@ -97,7 +119,7 @@ actor StreamTranscriber {
     func feed(_ samples: [Float]) async {
         unwritten += samples
         if unwritten.count > Self.holdBack {
-            write(Array(unwritten.prefix(unwritten.count - Self.holdBack)))
+            await save(Array(unwritten.prefix(unwritten.count - Self.holdBack)))
             unwritten.removeFirst(unwritten.count - Self.holdBack)
         }
         for sample in samples where abs(sample) > peak { peak = abs(sample) }
@@ -141,7 +163,7 @@ actor StreamTranscriber {
 
     /// Flushes whatever is still being said when recording stops.
     func finish() async {
-        write(unwritten)
+        await save(unwritten)
         unwritten.removeAll()
         if inSpeech {
             utterance += pending
@@ -153,7 +175,9 @@ actor StreamTranscriber {
 
     private func process(_ chunk: [Float]) async {
         var ended = false
-        if let result = try? await vad.processStreamingChunk(chunk, state: vadState, config: Self.vadConfig) {
+        do {
+            let result = try await vad.processStreamingChunk(chunk, state: vadState, config: Self.vadConfig)
+            detectionFailures = 0
             vadState = result.state
             switch result.event?.kind {
             case .speechStart where !inSpeech:
@@ -163,6 +187,11 @@ actor StreamTranscriber {
             default:
                 break
             }
+        } catch {
+            detectionFailures += 1
+            if detectionFailures == 1 { Log.write("voice detection failed: \(Log.describe(error))") }
+            // ~10 s of failures in a row: speech may be going unnoticed.
+            if detectionFailures == 40 { await onProblem?(.voiceDetection) }
         }
 
         if inSpeech {
@@ -204,23 +233,51 @@ actor StreamTranscriber {
 
     private func transcribeCurrent(isFinal: Bool) async {
         guard !utterance.isEmpty else { return }
-        let (text, confidence) = (try? await engine.transcribeScored(utterance)) ?? ("", 0)
         let start = Double(utteranceStart) / Resampler.sampleRate
         let end = start + Double(utterance.count) / Resampler.sampleRate
+        let text: String
+        let confidence: Float
+        do {
+            (text, confidence) = try await engine.transcribeScored(utterance)
+            recognitionFailures = 0
+        } catch {
+            // Not silence: keep what was shown so far rather than drop it.
+            guard isFinal else { return }
+            recognitionFailures += 1
+            Log.write("speech recognition failed: \(Log.describe(error))")
+            await emit(TranscriptEvent(utteranceID: utteranceID, speaker: speaker, start: start, end: end,
+                                       text: "", isFinal: true, failed: true))
+            if recognitionFailures == 3 { await onProblem?(.recognition) }
+            return
+        }
         await emit(TranscriptEvent(
             utteranceID: utteranceID, speaker: speaker, start: start, end: end, text: text, isFinal: isFinal,
             confidence: confidence))
     }
 
-    private func write(_ samples: [Float]) {
-        guard let audioFile, !samples.isEmpty,
-              let buffer = AVAudioPCMBuffer(pcmFormat: Resampler.outputFormat,
+    /// Writes to the track's audio file; the first problem is reported once.
+    private func save(_ samples: [Float]) async {
+        guard let failure = write(samples), !audioProblemReported else { return }
+        audioProblemReported = true
+        await onProblem?(.audioFile(failure))
+    }
+
+    /// nil when written (or no file was asked for), else what went wrong.
+    private func write(_ samples: [Float]) -> String? {
+        guard !samples.isEmpty else { return nil }
+        guard let audioFile else { return audioFileMissing ? "couldn't create the file" : nil }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: Resampler.outputFormat,
                                             frameCapacity: AVAudioFrameCount(samples.count))
-        else { return }
+        else { return nil }
         samples.withUnsafeBufferPointer { src in
             buffer.floatChannelData![0].update(from: src.baseAddress!, count: samples.count)
         }
         buffer.frameLength = AVAudioFrameCount(samples.count)
-        try? audioFile.write(from: buffer)
+        do {
+            try audioFile.write(from: buffer)
+            return nil
+        } catch {
+            return "couldn't write: \(Log.describe(error))"
+        }
     }
 }

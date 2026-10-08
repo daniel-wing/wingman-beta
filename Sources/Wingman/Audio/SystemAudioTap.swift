@@ -120,7 +120,7 @@ final class SystemAudioTap {
         formatDescription = "\(rate) Hz, \(channels) ch (tap \(asbd.mSampleRate) Hz)"
         Log.write("system audio start: using \(Int(rate)) Hz — tap \(Int(asbd.mSampleRate)) Hz, capture device \(Self.nominalSampleRate(of: aggregateID).map { "\(Int($0))" } ?? "?") Hz, output \(Self.nominalSampleRate(of: outputID).map { "\(Int($0))" } ?? "?") Hz (\(AudioDeviceMonitor.defaultOutputName() ?? "?")), \(channels) ch\(measuredRate != nil ? ", from measurement" : "")\(tapOnly ? (Self.forceTapOnly ? ", tap only (forced)" : ", tap only (output has a mic)") : "")")
         watchForRateChanges(tap: tapID, aggregate: aggregateID, output: outputID)
-        let rateCheck = RateCheck(expectedRate: rate)
+        let rateCheck = RateCheck(expectedRate: rate, tolerance: measuredRate == nil ? 0.15 : 0.05)
         self.rateCheck = rateCheck
         let counters = self.counters
         let layoutLogged = LockedFlag()
@@ -222,7 +222,7 @@ final class SystemAudioTap {
                 } catch {
                     // Leave nothing half-built; the watchdog tries again shortly.
                     self.teardown()
-                    Log.write("system audio restart failed: \(error)")
+                    Log.write("system audio restart failed: \(Log.describe(error))")
                 }
                 self.lastProgress = ProcessInfo.processInfo.systemUptime
             }
@@ -349,21 +349,33 @@ final class TapCounters: @unchecked Sendable {
 }
 
 /// Compares how much audio arrives with the rate the capture was set up for.
-/// A large, sustained mismatch means the rate changed without notice.
+/// A large, sustained mismatch means the rate changed without notice. Pauses
+/// don't count — AirPods stop sending audio while nothing plays — and two
+/// checks in a row must agree before the device's own rate is overridden.
 final class RateCheck: @unchecked Sendable {
     private let expectedRate: Double
+    private let tolerance: Double
     private let now: () -> UInt64
     private var frames = 0
     private var windowStart: UInt64 = 0
+    private var lastCallback: UInt64 = 0
     private var flagged = false
     private var checks = 0
+    /// The previous window's mismatch, snapped: a second one that agrees confirms it.
+    private var candidate: Double?
     /// Most recent measurement, for diagnostics.
     private(set) var lastMeasured: Double = 0
     private static let window: Double = 3       // seconds per check
-    private static let tolerance: Double = 0.15 // 15%
+    /// Longer than any normal gap between callbacks: audio stopped, not slowed.
+    private static let pause: Double = 0.5
 
-    init(expectedRate: Double, now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) {
+    /// `tolerance` is the mismatch that counts: 15 % against the device's own
+    /// rate; tighter after a restart at a measured rate, so a wrong measurement
+    /// gets corrected.
+    init(expectedRate: Double, tolerance: Double = 0.15,
+         now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) {
         self.expectedRate = expectedRate
+        self.tolerance = tolerance
         self.now = now
     }
 
@@ -373,8 +385,11 @@ final class RateCheck: @unchecked Sendable {
     /// one) once, when the incoming audio clearly doesn't match the expected rate.
     func add(frames count: Int) -> Double? {
         let now = self.now()
-        if windowStart == 0 {
+        defer { lastCallback = now }
+        // First callback, or the first after a pause: start measuring afresh.
+        if windowStart == 0 || Double(now - lastCallback) / 1e9 > Self.pause {
             windowStart = now
+            frames = 0
             return nil
         }
         frames += count
@@ -386,9 +401,16 @@ final class RateCheck: @unchecked Sendable {
         checks += 1
         if checks <= 2 { Log.write("system audio arriving at ~\(Int(measured)) Hz (expected \(Int(expectedRate)) Hz)") }
         lastMeasured = measured
-        guard !flagged, abs(measured / expectedRate - 1) > Self.tolerance else { return nil }
-        flagged = true
+        guard !flagged, abs(measured / expectedRate - 1) > tolerance else {
+            candidate = nil
+            return nil
+        }
         let snapped = Self.commonRates.min { abs($0 - measured) < abs($1 - measured) } ?? measured
+        guard candidate == snapped else {
+            candidate = snapped  // wait for the next window to agree
+            return nil
+        }
+        flagged = true
         Log.write("system audio arriving at ~\(Int(measured)) Hz, expected \(Int(expectedRate)) Hz; switching to \(Int(snapped)) Hz")
         return snapped
     }

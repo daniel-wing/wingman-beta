@@ -3,20 +3,29 @@ import UserNotifications
 
 /// Wingman's notifications: asking whether to record a detected call, and
 /// telling you when a call is being recorded, with buttons to act on both.
+/// Each one carries the call or recording it's about, so a late click can't
+/// act on a different one; clicking a banner itself only opens Wingman.
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     enum Action: String {
         case record, ignore, stop, discard
+        /// The banner itself was clicked: show the question or recording in the window.
+        case open
     }
 
     private static let askCategory = "CALL_DETECTED"
     private static let recordingCategory = "RECORDING"
-    private static let askID = "wingman.ask"
+    private static let askPrefix = "wingman.ask."
     private static let recordingID = "wingman.recording"
     private static let warningID = "wingman.warning"
+    /// userInfo key for the call session or recording a notification is about.
+    nonisolated private static let subjectKey = "subject"
 
     private let center = UNUserNotificationCenter.current()
-    var onAction: ((Action) -> Void)?
+    /// The action, and the call session (ask) or recording (recording) it's for.
+    var onAction: ((Action, UUID?) -> Void)?
+    /// Questions posted and not yet withdrawn.
+    private var askIDs: Set<String> = []
 
     override init() {
         super.init()
@@ -65,10 +74,13 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         #endif
         content.categoryIdentifier = Self.askCategory
         content.sound = .default
-        post(Self.askID, content)
+        content.userInfo = [Self.subjectKey: session.id.uuidString]
+        let id = Self.askPrefix + session.id.uuidString
+        askIDs.insert(id)
+        post(id, content)
     }
 
-    func announceRecording(_ app: CallApp?, meeting: String?) {
+    func announceRecording(_ app: CallApp?, meeting: String?, recording: UUID) {
         withdrawAsk()
         let content = UNMutableNotificationContent()
         content.title = "Wingman is recording"
@@ -80,6 +92,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
                 ?? "Stop it here or from the menu bar when you're done."
         }
         content.categoryIdentifier = Self.recordingCategory
+        content.userInfo = [Self.subjectKey: recording.uuidString]
         post(Self.recordingID, content)
     }
 
@@ -89,6 +102,16 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         content.title = "Meeting saved"
         content.body = warning.map { "\(name) — \($0)" } ?? name
         post("wingman.saved.\(UUID().uuidString)", content)
+    }
+
+    /// The note couldn't be written: the transcript is still in the window.
+    func announceNotSaved() {
+        withdrawRecording()
+        let content = UNMutableNotificationContent()
+        content.title = "The meeting wasn't saved"
+        content.body = "Wingman couldn't write the note. Open Wingman to save the transcript somewhere else."
+        content.sound = .default
+        post("wingman.notsaved.\(UUID().uuidString)", content)
     }
 
     /// A problem worth knowing about during a call, e.g. mute not being followed.
@@ -103,9 +126,13 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         center.removeDeliveredNotifications(withIdentifiers: [Self.warningID])
     }
 
-    func withdrawAsk() {
-        center.removeDeliveredNotifications(withIdentifiers: [Self.askID])
-        center.removePendingNotificationRequests(withIdentifiers: [Self.askID])
+    /// Withdraws the question about one call, or all of them.
+    func withdrawAsk(_ session: UUID? = nil) {
+        let ids = session.map { [Self.askPrefix + $0.uuidString] } ?? Array(askIDs)
+        guard !ids.isEmpty else { return }
+        askIDs.subtract(ids)
+        center.removeDeliveredNotifications(withIdentifiers: ids)
+        center.removePendingNotificationRequests(withIdentifiers: ids)
     }
 
     func withdrawRecording() {
@@ -127,12 +154,13 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
     ) async {
         let id = response.actionIdentifier
-        let category = response.notification.request.content.categoryIdentifier
+        let subject = (response.notification.request.content.userInfo[Self.subjectKey] as? String).flatMap(UUID.init)
         await MainActor.run {
-            if let action = Action(rawValue: id) {
-                onAction?(action)
-            } else if id == UNNotificationDefaultActionIdentifier, category == Self.askCategory {
-                onAction?(.record)  // clicking the banner itself means "yes"
+            if let action = Action(rawValue: id), action != .open {
+                onAction?(action, subject)
+            } else if id == UNNotificationDefaultActionIdentifier {
+                // Clicking a banner only opens Wingman: recording needs the Record button.
+                onAction?(.open, subject)
             }
         }
     }

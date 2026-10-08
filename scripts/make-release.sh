@@ -48,6 +48,21 @@ else
   git clone -q "$PWD" "$SRC"
   git -C "$SRC" checkout -q --detach "$(git rev-parse HEAD)"
 fi
+# The tests first: a release is built only from a commit that passes them.
+TEST_FLAGS=()
+CLT=/Library/Developer/CommandLineTools/Library/Developer/Frameworks
+if [[ "$(xcode-select -p 2>/dev/null)" == /Library/Developer/CommandLineTools* ]]; then
+  # Without Xcode, SwiftPM can't find the Testing framework by itself.
+  TEST_FLAGS=(-Xswiftc -F -Xswiftc "$CLT" -Xlinker -F -Xlinker "$CLT" -Xlinker -rpath -Xlinker "$CLT"
+              -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib)
+fi
+echo "==> Testing…"
+if ! (cd "$SRC" && swift test --disable-keychain --only-use-versions-from-resolved-file "${TEST_FLAGS[@]}" > "$STAGE/tests.log" 2>&1); then
+  tail -20 "$STAGE/tests.log" >&2
+  echo "error: the tests fail; refusing to build a release" >&2
+  exit 1
+fi
+grep -E "Test run with" "$STAGE/tests.log" | tail -1
 (cd "$SRC" && RELEASE=1 DEST="$STAGE" ./install.sh)
 APP="$STAGE/Wingman.app"
 codesign --verify --deep --strict "$APP"
@@ -97,3 +112,14 @@ cat > "$OUT/appcast.xml" <<FEED
 FEED
 xmllint --noout "$OUT/appcast.xml"
 echo "==> $OUT/appcast.xml"
+
+# What goes public: the public part of this commit, the zip and the public
+# repo's history, checked for identifying details. Nothing ships if it fails.
+PUBLIC="$PWD/.build/public-repo"
+if [[ ! -d "$PUBLIC/.git" ]]; then
+  echo "error: clone the public repo first: git clone https://github.com/daniel-wing/wingman-beta.git .build/public-repo" >&2
+  exit 1
+fi
+scripts/export-public.sh "$PUBLIC" >/dev/null
+echo "==> Checking what goes public…"
+scripts/check-public.sh --zip "$ZIP" --repo "$PUBLIC" "$PUBLIC" beta-site

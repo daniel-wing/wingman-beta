@@ -14,14 +14,27 @@ enum Log {
     /// its calendar title) is left out.
     static func redacted(_ message: String) -> String {
         var text = message.replacingOccurrences(of: NSHomeDirectory(), with: "~")
-        text = text.replacingOccurrences(of: #"Meeting Notes/[^"',;)\]\n]+"#, with: "Meeting Notes/…",
+        // A path in the notes folder, plain or percent-encoded, up to its file's
+        // extension — names can contain commas, quotes and brackets — and otherwise
+        // to the end of the line, so nothing of a meeting title is left.
+        text = text.replacingOccurrences(of: #"Meeting( |%20)Notes/[^\n]*?\.(md|m4a|wav|vtt|srt)\b"#, with: "Meeting$1Notes/…",
                                          options: .regularExpression)
-        // The same path inside an NSURL, percent-encoded…
-        text = text.replacingOccurrences(of: #"Meeting%20Notes/[^\s,;)\]}"']+"#, with: "Meeting%20Notes/…",
+        text = text.replacingOccurrences(of: #"Meeting( |%20)Notes/(?!…)[^\n]*"#, with: "Meeting$1Notes/…",
                                          options: .regularExpression)
         // …and a bare file name quoted in an error message ("“08-01 Weekly sync.md” couldn't be…").
         text = text.replacingOccurrences(of: #"[“"][^”"\n]*\.(md|m4a|wav|vtt|srt)[”"]"#, with: "“…”",
                                          options: .regularExpression)
+        return text
+    }
+
+    /// An error for the log: its domain and code (and the underlying one's), not
+    /// its description, which can carry file names — that is, meeting titles.
+    static func describe(_ error: Error) -> String {
+        let nsError = error as NSError
+        var text = "\(nsError.domain) \(nsError.code)"
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            text += " (\(underlying.domain) \(underlying.code))"
+        }
         return text
     }
     /// Unit tests feed made-up audio events; keep them out of the real log. Look for

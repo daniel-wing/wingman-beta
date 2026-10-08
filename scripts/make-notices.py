@@ -64,8 +64,9 @@ def main() -> None:
     out = [
         "# Third-party notices",
         "",
-        "Wingman is proprietary software (see LICENSE). It is built with the open-source",
-        "components and models below, used under their licenses. Thank you to everyone who made them.",
+        "Wingman is open source under the MIT license (see LICENSE). It is built with the",
+        "open-source components and models below, used under their own licenses. Thank you to",
+        "everyone who made them.",
         "",
         MODELS,
         "## Software libraries",

@@ -129,15 +129,36 @@ private func line(_ speaker: Speaker, _ start: TimeInterval, _ end: TimeInterval
 
 @MainActor
 @Suite struct EchoFilterTests {
-    @Test func sameWordsAreAnEcho() {
-        #expect(Recorder.isEcho("Hemos podido ver algunas cosas de los comportamientos",
-                                "hemos podido ver algunas cosas de los comportamientos, pero"))
+    @Test func aClearRepeatRightAfterIsAnEcho() {
+        #expect(Recorder.echoVerdict(mine: "Hemos podido ver algunas cosas de los comportamientos",
+                                     theirs: "hemos podido ver algunas cosas de los comportamientos, pero", delay: 0.2) == .echo)
+        #expect(Recorder.echoVerdict(mine: "We ship on Friday, right after the review",
+                                     theirs: "We ship on Friday right after the review.", delay: 0) == .echo)
     }
 
-    @Test func shortRealReplyIsKept() {
+    @Test func aDisagreementIsNeverDeleted() {
+        // The review's examples: one word flips the meaning.
+        #expect(Recorder.echoVerdict(mine: "We should not deploy today", theirs: "We should deploy today", delay: 0.3) == .possible)
+        #expect(Recorder.echoVerdict(mine: "I cannot approve this", theirs: "I can approve this", delay: 0.3) == .possible)
+        #expect(Recorder.echoVerdict(mine: "We don't ship on Friday", theirs: "We ship on Friday", delay: 0.3) == .possible)
+        // Same words, opposite order.
+        #expect(Recorder.echoVerdict(mine: "I was right, you were wrong", theirs: "you were right, I was wrong", delay: 0.2) == .possible)
+    }
+
+    @Test func timingAndShortLines() {
+        // A repeat said seconds later is a reply, not an echo.
+        #expect(Recorder.echoVerdict(mine: "We ship on Friday right after the review", theirs: "We ship on Friday right after the review", delay: 3) == .possible)
+        // Short exact repeats ("Thank you" back) are kept, marked.
+        #expect(Recorder.echoVerdict(mine: "Buenos días.", theirs: "Buenos días", delay: 0.1) == .possible)
         // "Sí" said by me while the other side's sentence also contains "sí".
-        #expect(!Recorder.isEcho("Sí.", "Sí, ok, sí tienen acceso."))
-        #expect(Recorder.isEcho("Buenos días.", "Buenos días"))
+        #expect(Recorder.echoVerdict(mine: "Sí.", theirs: "Sí, ok, sí tienen acceso.", delay: 0.1) == .none)
+        #expect(Recorder.echoVerdict(mine: "Totally unrelated words here", theirs: "We ship on Friday", delay: 0) == .none)
+    }
+
+    @Test func orderedSimilarityCountsWordEdits() {
+        #expect(Recorder.orderedSimilarity(["a", "b", "c", "d"], ["a", "b", "c", "d"]) == 1)
+        #expect(Recorder.orderedSimilarity(["a", "b", "c", "d"], ["a", "x", "c", "d"]) == 0.75)
+        #expect(Recorder.orderedSimilarity(["a", "b"], ["c", "d"]) == 0)
     }
 }
 

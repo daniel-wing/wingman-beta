@@ -137,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminate.resume()
         terminateSignal = terminate
         watcher.start()
+        recorder.removeLeftoverScratch()
         recorder.cleanUpAudio()
         #if !APP_STORE
         callMute.start()
@@ -212,19 +213,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func toggleRecording() {
         if recorder.isRecording {
-            Task {
-                notifier.withdrawRecording()
-                await recorder.stop()
-                if let note = recorder.currentNote {
-                    notifier.announceSaved(note.deletingPathExtension().lastPathComponent, warning: recorder.warning)
-                }
-            }
+            Task { await watcher.stopRecording() }
         } else if recorder.phase == .idle {
             Task {
                 await recorder.start()
                 if recorder.isRecording {
                     let name = recorder.meetingName.trimmingCharacters(in: .whitespaces)
-                    notifier.announceRecording(nil, meeting: name.isEmpty ? nil : name)
+                    notifier.announceRecording(nil, meeting: name.isEmpty ? nil : name, recording: recorder.recordingID)
                 } else if recorder.lastError != nil {
                     watcher.showWindow?()
                 }
@@ -317,9 +312,20 @@ private struct MenuBarLabel: View {
     @ViewBuilder private var icon: some View {
         if let symbol {
             Image(systemName: symbol)
+                .accessibilityLabel(stateDescription)
         } else {
             Image(nsImage: MenuBarIcon.image).renderingMode(.template)
+                .accessibilityLabel(stateDescription)
         }
+    }
+
+    /// What the icon shows, for VoiceOver: "Wingman, recording, microphone muted".
+    private var stateDescription: String {
+        let recorder = delegate.recorder
+        var parts = ["Wingman"]
+        if recorder.isRecording { parts.append("recording") }
+        if recorder.effectiveMuted || recorder.micMuted { parts.append("microphone muted") }
+        return parts.joined(separator: ", ")
     }
 
     private var symbol: String? {
@@ -379,7 +385,7 @@ private struct MenuContent: View {
 
     var body: some View {
         if recorder.isRecording {
-            Button("Stop Recording") { Task { await recorder.stop() } }
+            Button("Stop Recording") { Task { await watcher.stopRecording() } }
         } else {
             Button("Start Recording") {
                 showWindow()

@@ -39,6 +39,9 @@ final class VoiceLibrary {
     static let minimumLead: Float = 0.08
 
     private(set) var people: [Person] = []
+    /// What couldn't be saved or deleted, shown in Settings → People; nil when
+    /// the list on disk matches what's shown.
+    private(set) var problem: String?
 
     nonisolated static let defaultFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Wingman", isDirectory: true)
@@ -92,33 +95,54 @@ final class VoiceLibrary {
     /// with no voices is forgotten.
     func undo(_ undo: LearnUndo) {
         guard let i = people.firstIndex(where: { $0.id == undo.person }) else { return }
-        let sum = people[i].runningSum
-        if people[i].meetings <= 1 || sum.count != undo.voiceprint.count {
-            people.remove(at: i)
+        var list = people
+        let sum = list[i].runningSum
+        if list[i].meetings <= 1 || sum.count != undo.voiceprint.count {
+            list.remove(at: i)
         } else {
             let rest = zip(sum, undo.voiceprint).map(-)
-            people[i].sum = rest
-            people[i].voiceprint = Self.normalized(rest)
-            people[i].meetings -= 1
+            list[i].sum = rest
+            list[i].voiceprint = Self.normalized(rest)
+            list[i].meetings -= 1
         }
-        save()
+        replace(with: list, failure: "Wingman couldn't take back a voice it had learned")
     }
 
     func rename(_ person: Person, to name: String) {
         let name = name.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty, let i = people.firstIndex(of: person) else { return }
-        people[i].name = name
-        save()
+        var list = people
+        list[i].name = name
+        replace(with: list, failure: "Wingman couldn't rename \(person.name)")
     }
 
+    /// Forgets a person only once that's on disk: if it can't be saved, they stay
+    /// listed (forgetting again retries) and the problem is shown.
     func forget(_ person: Person) {
-        people.removeAll { $0.id == person.id }
-        save()
+        replace(with: people.filter { $0.id != person.id }, failure: "Wingman couldn't forget \(person.name)")
     }
 
     func forgetEveryone() {
-        people = []
-        try? FileManager.default.removeItem(at: file)
+        do {
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+            people = []
+            problem = nil
+        } catch {
+            Log.write("couldn't delete the voices: \(Log.describe(error))")
+            problem = "Wingman couldn't delete its list of voices (\(error.localizedDescription)), so nobody was forgotten. Try again."
+        }
+    }
+
+    /// Saves `list` and only then shows it.
+    private func replace(with list: [Person], failure: String) {
+        do {
+            try persist(list)
+            people = list
+            problem = nil
+        } catch {
+            Log.write("couldn't save voices: \(Log.describe(error))")
+            problem = "\(failure) (\(error.localizedDescription)). Try again."
+        }
     }
 
     // MARK: - Matching
@@ -189,10 +213,16 @@ final class VoiceLibrary {
 
     private func save() {
         do {
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try JSONEncoder().encode(people).write(to: file, options: [.atomic, .completeFileProtection])
+            try persist(people)
+            problem = nil
         } catch {
-            Log.write("couldn't save voices: \(error)")
+            Log.write("couldn't save voices: \(Log.describe(error))")
+            problem = "Wingman couldn't save its list of voices (\(error.localizedDescription))."
         }
+    }
+
+    private func persist(_ list: [Person]) throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(list).write(to: file, options: [.atomic, .completeFileProtection])
     }
 }

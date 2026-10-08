@@ -76,8 +76,18 @@ scan() {  # label, file
 
 scanned=()
 for path in "${PATHS[@]}"; do
-  while IFS= read -r -d '' file; do scan "${file#./}" "$file"; done < <(find "$path" -type f -print0)
-  scanned+=("$path")
+  # A path that isn't there must fail, not pass as "nothing found".
+  if [[ ! -e "$path" ]]; then
+    problem "$path doesn't exist, so it wasn't checked"
+    continue
+  fi
+  files=0
+  while IFS= read -r -d '' file; do
+    scan "${file#./}" "$file"
+    files=$((files + 1))
+  done < <(find "$path" -type f -not -path "*/.git/*" -print0)
+  (( files > 0 )) || problem "$path has no files to check"
+  scanned+=("$path ($files files)")
 done
 
 if [[ -n "$ZIP" ]]; then
@@ -113,7 +123,7 @@ fi
 [[ -f "$PRIVATE" ]] || echo "  note: no private list at $PRIVATE — add your workplace, clients, colleagues and projects there"
 echo "  checked ${scanned[*]} against $(wc -l < "$DENY" | tr -d ' ') terms"
 if (( HITS > 0 )); then
-  echo "✗ $HITS identifying detail(s) found — fix them before publishing" >&2
+  echo "✗ $HITS problem(s) found (above) — fix them before publishing" >&2
   exit 1
 fi
 echo "✓ nothing identifying found"

@@ -81,6 +81,34 @@ private final class Sink: @unchecked Sendable {
         // AirPods switching to headset mode: audio arrives at 24 kHz, not 48.
         #expect(run(expected: 48_000, actual: 23_900, seconds: 10) == [24_000])
     }
+
+    /// Feeds 10 ms callbacks at `rate`, with pauses: (after seconds, for seconds).
+    private func runWithPauses(expected: Double, rate: Double, seconds: Double, pauses: [(Double, Double)],
+                               tolerance: Double = 0.15) -> [Double] {
+        var nanos: UInt64 = 1_000_000_000
+        let check = RateCheck(expectedRate: expected, tolerance: tolerance) { nanos }
+        var flagged: [Double] = []
+        var t = 0.0
+        while t < seconds {
+            for (at, length) in pauses where t < at && t + 0.01 >= at { nanos += UInt64(length * 1e9) }
+            nanos += 10_000_000
+            t += 0.01
+            if let found = check.add(frames: Int(rate / 100)) { flagged.append(found) }
+        }
+        return flagged
+    }
+
+    @Test func pausesInTheAudioArentARateChange() {
+        // The review's case: 10 s with no callbacks (AirPods, nothing playing).
+        #expect(runWithPauses(expected: 48_000, rate: 48_000, seconds: 20, pauses: [(2, 10)]).isEmpty)
+        // A short stall late in a window, which locked in 44.1 kHz before.
+        #expect(runWithPauses(expected: 48_000, rate: 48_000, seconds: 20, pauses: [(2.7, 0.6), (8.5, 0.6)]).isEmpty)
+    }
+
+    @Test func aWrongMeasuredRateGetsCorrected() {
+        // Restarted at a measured 44.1 kHz while the audio really is 48 kHz.
+        #expect(runWithPauses(expected: 44_100, rate: 48_000, seconds: 10, pauses: [], tolerance: 0.05) == [48_000])
+    }
 }
 
 @Suite struct ResamplerTests {

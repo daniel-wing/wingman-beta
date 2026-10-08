@@ -8,7 +8,7 @@ let package = Package(
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.17.5"),
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.18.0"),
         // Automatic updates for the direct-download build (left out of the App Store one).
-        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.10.0"),
     ],
     targets: [
         .executableTarget(

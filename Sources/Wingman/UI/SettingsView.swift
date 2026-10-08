@@ -116,7 +116,7 @@ struct SettingsView: View {
             } header: {
                 Text("Audio")
             } footer: {
-                footnote("Each meeting is saved as one small audio file with both sides mixed (about 15 MB per hour), plus your microphone and the call as separate tracks (about 30 MB per hour more), which help when checking a recording. Audio these rules remove goes to the Trash, oldest first; notes and subtitles are always kept. \(audioUsage)Headphones give the cleanest recording: with speakers your microphone also hears the other side (repeated lines are dropped from the transcript).")
+                footnote("Each meeting is saved as one small audio file with both sides mixed (about 15 MB per hour), plus your microphone and the call as separate tracks (about 30 MB per hour more), which help when checking a recording. Audio these rules remove goes to the Trash, oldest first; notes and subtitles are always kept. With Save meeting audio off, Wingman still records audio during a meeting to transcribe it, in a private folder, and deletes it once the note is saved. \(audioUsage)Headphones give the cleanest recording: with speakers your microphone also hears the other side (repeated lines are dropped from the transcript).")
             }
             .disabled(recorder.phase != .idle)
             .task(id: "\(recorder.phase == .idle) \(recorder.removeAudioAfterDays) \(recorder.audioLimitGB)") {
@@ -209,6 +209,11 @@ private struct PeopleSection: View {
             } else {
                 ForEach(voices.people.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) { person in
                     PersonRow(person: person, voices: voices)
+                }
+                if let problem = voices.problem {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Button("Forget Everyone…", role: .destructive) { confirmForgetAll = true }
                     .confirmationDialog("Forget all \(voices.people.count) voices?", isPresented: $confirmForgetAll) {

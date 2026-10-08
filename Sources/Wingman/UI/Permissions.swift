@@ -66,6 +66,7 @@ final class Permissions {
                     try fresh.start { _ in }
                 } catch {
                     systemAudio = .denied
+                    UserDefaults.standard.removeObject(forKey: "systemAudioConfirmed")
                     return
                 }
                 tap = fresh
@@ -84,6 +85,7 @@ final class Permissions {
             }
         }
         systemAudio = .denied
+        UserDefaults.standard.removeObject(forKey: "systemAudioConfirmed")
     }
 
     private static func playNudge() {

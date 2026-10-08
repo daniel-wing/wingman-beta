@@ -116,11 +116,15 @@ struct CallTracker {
         for (key, scan) in observation.browsers {
             updateBrowser(key, scan: scan, now: now, events: &events)
         }
-        for (key, state) in browsers where observation.browsers[key] == nil && now.timeIntervalSince(state.lastSeen) >= Self.endAfter {
-            for session in [state.plainSession].compactMap({ $0 }) + state.meetings.values.compactMap(\.session) {
-                events.append(.ended(session))
+        for (key, state) in browsers where observation.browsers[key] == nil {
+            let sessions = [state.plainSession].compactMap({ $0 }) + state.meetings.values.compactMap(\.session)
+            // Gone before anything started: its 3 s start over, like an app's.
+            if sessions.isEmpty {
+                browsers[key] = nil
+            } else if now.timeIntervalSince(state.lastSeen) >= Self.endAfter {
+                events.append(contentsOf: sessions.map(Event.ended))
+                browsers[key] = nil
             }
-            browsers[key] = nil
         }
         return events
     }
@@ -220,7 +224,10 @@ struct CallTracker {
             state.holdBackPlain = true
         }
 
-        for (meetingKey, var meeting) in state.meetings where meeting.session == nil && now.timeIntervalSince(meeting.firstSeen) >= Self.startAfter {
+        // Only a meeting seen in this poll starts: readings that can't see it
+        // (partial, unavailable) don't count as it being there.
+        for (meetingKey, var meeting) in state.meetings
+        where meeting.session == nil && seenKeys.contains(meetingKey) && now.timeIntervalSince(meeting.firstSeen) >= Self.startAfter {
             let session = CallSession(id: makeID(), app: .meet, evidence: meeting.candidate.evidence,
                                       meetingCode: meeting.candidate.code, browser: key)
             meeting.session = session

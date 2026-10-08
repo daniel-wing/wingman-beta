@@ -20,6 +20,8 @@ FLAGS=(-c release --disable-keychain)
 # The App Store variant has no Sparkle code; dead_strip_dylibs drops the unused link too.
 [[ -n "${APP_STORE:-}" ]] && FLAGS+=(-Xswiftc -DAPP_STORE -Xlinker -dead_strip_dylibs) && echo "    (App Store variant)"
 [[ -n "${APP_STORE:-}${RELEASE:-}" ]] && FLAGS+=(-Xswiftc -DNO_DIAGNOSTICS) && echo "    (without diagnostic tools)"
+# Releases build exactly the dependency versions in Package.resolved.
+[[ -n "${RELEASE:-}" ]] && FLAGS+=(--only-use-versions-from-resolved-file)
 swift build "${FLAGS[@]}"
 BIN="$(swift build "${FLAGS[@]}" --show-bin-path)"
 

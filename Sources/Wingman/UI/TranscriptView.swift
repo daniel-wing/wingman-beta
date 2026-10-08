@@ -115,7 +115,7 @@ struct TranscriptView: View {
             HStack {
                 status
                 Spacer()
-                if let note = recorder.currentNote {
+                if let note = recorder.currentNote, recorder.noteSaved {
                     Button("Show Note") { NSWorkspace.shared.activateFileViewerSelecting([note]) }
                     if recorder.phase == .idle, recorder.lines.contains(where: \.isFinal) {
                         Menu("Export") {
@@ -128,6 +128,7 @@ struct TranscriptView: View {
                         Button { reporter.report(call) } label: { Image(systemName: "exclamationmark.bubble") }
                             .buttonStyle(.borderless)
                             .help("Report a problem with this call")
+                            .accessibilityLabel("Report a problem with this call")
                     }
                 }
                 muteButton
@@ -197,6 +198,16 @@ struct TranscriptView: View {
                     .font(.callout)
                     .textSelection(.enabled)
             }
+            if let error = recorder.noteSaveError {
+                HStack {
+                    Label(error, systemImage: "xmark.octagon.fill")
+                        .foregroundStyle(.red)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button("Save Note As…") { saveNoteAs() }
+                }
+            }
         }
         .padding(12)
     }
@@ -252,6 +263,20 @@ struct TranscriptView: View {
         recorder.phase == .idle && recorder.lines.contains(where: \.isFinal)
     }
 
+    /// The note couldn't be saved where it belongs: keep a copy somewhere else.
+    private func saveNoteAs() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = recorder.currentNote?.lastPathComponent ?? "Meeting.md"
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try recorder.saveNoteCopy(to: url)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
     private func export(_ format: SubtitleExport.Format) {
         if let url = recorder.exportSubtitles(format) {
             NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -294,11 +319,13 @@ struct TranscriptView: View {
                 .foregroundStyle(recorder.micMuted ? Color.orange : Color.primary)
         }
         .help(recorder.micMuted ? "Unmute your microphone in Wingman" : "Mute your microphone in Wingman — e.g. while playing a recorded call")
+        .accessibilityLabel(recorder.micMuted ? "Unmute microphone" : "Mute microphone")
+        .accessibilityValue(recorder.micMuted ? "Your microphone is muted in Wingman" : "Your microphone is being transcribed")
     }
 
     @ViewBuilder private var recordButton: some View {
         if recorder.isRecording {
-            Button("Stop") { Task { await recorder.stop() } }
+            Button("Stop") { Task { await watcher.stopRecording() } }
                 .keyboardShortcut(".", modifiers: .command)
         } else {
             Button("Record") { Task { await recorder.start() } }
@@ -400,7 +427,15 @@ private struct LineView: View {
                 .foregroundStyle(line.isFinal && !line.isUnclear ? .primary : .secondary)
                 .italic(!line.isFinal)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if line.isUnclear {
+            if line.incomplete {
+                Image(systemName: "exclamationmark.bubble.fill")
+                    .foregroundStyle(.orange)
+                    .help("The speech model failed on this line; this is what it had heard so far.")
+            } else if line.possibleEcho {
+                Image(systemName: "speaker.wave.2.bubble")
+                    .foregroundStyle(.secondary)
+                    .help("This may be the call coming back through your speakers rather than you. It's kept because it isn't a clear repeat.")
+            } else if line.isUnclear {
                 Image(systemName: "questionmark.circle.fill")
                     .foregroundStyle(.orange)
                     .help("Wingman wasn't sure about this line (confidence \(Int(line.confidence * 100))%). Check it against the audio.")

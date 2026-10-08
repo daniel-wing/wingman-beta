@@ -19,6 +19,10 @@ These are promises to the people who use Wingman; changes need to keep them:
   of the `APP_STORE` build with `#if !APP_STORE`.
 - **Accessibility is read-only:** Wingman reads Teams'/Zoom's mute button and
   Chrome's tab strip; it never clicks, types or switches anything on in another app.
+- **When unsure, keep the user's words:** a line that might be an echo is kept, marked,
+  not deleted; a line the speech engine failed on is kept, marked.
+- **Never claim what didn't happen:** "saved", "forgotten", "discarded" only after the
+  disk operation worked; errors are shown, and logged as domain and code only.
 - The app's text is in English, short and plain.
 
 ## Build and run
@@ -145,10 +149,11 @@ Tools that only read files run straight from the build:
 
 ## Releases
 
-Official builds are made by the maintainer with `scripts/make-release.sh`: signed
-with the project's certificate (so macOS keeps users' permissions across updates)
-and with the update key that installed copies trust. `scripts/check-public.sh`
-checks every release for identifying details before it's published.
+Official builds are made by the maintainer with `scripts/make-release.sh`. It runs the
+tests, builds from a clean copy of the last commit with the exact pinned dependency
+versions, signs with the project's certificate (so macOS keeps users' permissions across
+updates) and the update key that installed copies trust, and checks the release, the
+public tree and its history for identifying details (`scripts/check-public.sh`).
 
 ## Ideas on the list
 

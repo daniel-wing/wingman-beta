@@ -95,7 +95,7 @@ enum LanguageReview {
             whisper = try await WhisperModel.load()
             Log.write(String(format: "language review: Whisper ready in %.1f s", Date().timeIntervalSince(began)))
         } catch {
-            Log.write("language review: Whisper unavailable (\(error)); Apple re-check only")
+            Log.write("language review: Whisper unavailable (\(Log.describe(error))); Apple re-check only")
             return await TranscriptCheck.fixes(for: lines, audio: audio, enabled: enabled)
                 .map { Fix(index: $0.index, text: $0.text, language: $0.language, languageFixed: true) }
         }
@@ -107,7 +107,10 @@ enum LanguageReview {
             return (results.map(\.text).joined(separator: " "), results.first?.language)
         }
         // Prints each change (diagnostics only; the log never gets transcript text).
+        // Left out of release builds: the output is meeting content.
+        #if !NO_DIAGNOSTICS
         let showChanges = ProcessInfo.processInfo.environment["WINGMAN_REVIEW_DIFF"] != nil
+        #endif
 
         var fixes: [Fix] = []
         for (n, index) in suspects.enumerated() {
@@ -130,9 +133,11 @@ enum LanguageReview {
             if text != line.text {
                 let wasOtherLanguage = TranscriptCheck.misdetected(line.text, enabled: enabled) != nil
                 fixes.append(Fix(index: index, text: text, language: language, languageFixed: wasOtherLanguage))
+                #if !NO_DIAGNOSTICS
                 if showChanges {
                     print("[\(Recorder.timestamp(line.start))] (\(String(format: "%.2f", line.confidence))) \(line.text)\n    ⇒ (\(language.rawValue)) \(text)")
                 }
+                #endif
             }
         }
         Log.write(String(format: "language review: %d lines changed, %.1f s in all", fixes.count, Date().timeIntervalSince(began)))

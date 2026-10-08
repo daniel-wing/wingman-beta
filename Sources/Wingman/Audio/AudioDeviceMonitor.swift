@@ -88,6 +88,33 @@ final class AudioDeviceMonitor {
         deviceName(kAudioHardwarePropertyDefaultInputDevice)
     }
 
+    /// Whether the call plays into the user's ears — AirPods or another Bluetooth
+    /// headset, or headphones in the jack — so the microphone can't hear it and
+    /// nothing it hears is an echo. Unknown or anything else counts as speakers.
+    static func outputIsHeadphones() -> Bool {
+        var device = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = address(kAudioHardwarePropertyDefaultOutputDevice)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr
+        else { return false }
+        func value(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope) -> UInt32? {
+            var result: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+            return AudioObjectGetPropertyData(device, &address, 0, nil, &size, &result) == noErr ? result : nil
+        }
+        switch value(kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal) {
+        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE:
+            return true
+        case kAudioDeviceTransportTypeBuiltIn:
+            // 'hdpn': the headphone jack (older Macs switch the built-in device's source).
+            if value(kAudioDevicePropertyDataSource, kAudioObjectPropertyScopeOutput) == 0x6864_706E { return true }
+            return defaultOutputName()?.localizedCaseInsensitiveContains("headphone") == true
+        default:
+            return false
+        }
+    }
+
     private static func deviceName(_ selector: AudioObjectPropertySelector) -> String? {
         var device = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)

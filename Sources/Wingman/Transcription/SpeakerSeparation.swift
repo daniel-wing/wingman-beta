@@ -40,7 +40,7 @@ actor SpeakerSeparation {
             try Self.writeDithered(audio, to: copy)
             source = copy
         } catch {
-            Log.write("couldn't prepare audio for speaker separation, using it as is: \(error)")
+            Log.write("couldn't prepare audio for speaker separation, using it as is: \(Log.describe(error))")
         }
         let result = try await manager.process(source)
         let turns = result.segments.map {

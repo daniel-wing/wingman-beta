@@ -21,6 +21,11 @@ struct TranscriptLine: Identifiable, Equatable {
     /// Single-word lines ("Oh", "Hmm") often score low but rarely matter, so they aren't flagged.
     /// Re-transcribed after the meeting because it came out in a disabled language.
     var rechecked = false
+    /// The speech engine failed on the final pass: the text is what was heard so far.
+    var incomplete = false
+    /// Your line looks like the call's audio coming back through the speakers,
+    /// but not clearly enough to drop it.
+    var possibleEcho = false
 
     var isUnclear: Bool {
         isFinal && !rechecked && confidence < Self.unclearBelow && text.split(whereSeparator: \.isWhitespace).count > 1
@@ -143,6 +148,19 @@ final class Recorder {
     /// Short status note, e.g. "Switched to AirPods Pro at 00:12:03".
     private(set) var notice: String?
     private(set) var lastError: String?
+    /// The note on disk has everything up to the last write (false before the
+    /// first write and after a failed one, so nothing claims "saved" untrue).
+    private(set) var noteSaved = false
+    /// Why the note couldn't be saved: shown in the window with Save Note As….
+    private(set) var noteSaveError: String?
+    /// Identifies this recording, so an action from an older notification
+    /// (Stop, Discard) can't apply to a newer one.
+    private(set) var recordingID = UUID()
+    /// Stream problems already shown in this recording (one warning each).
+    private var reportedProblems: Set<String> = []
+    /// The call played through speakers at some point in this recording, so the
+    /// microphone may have heard it (no echo filtering when it's headphones only).
+    private var speakersUsed = true
     private(set) var currentNote: URL?
     private(set) var startedAt: Date?
     private var endedAt: Date?
@@ -408,25 +426,30 @@ final class Recorder {
             lines = []
             startedAt = started
             endedAt = nil
+            recordingID = UUID()
             currentNote = base.appendingPathExtension("md")
             noteWrittenAt = nil
+            noteSaved = false
+            noteSaveError = nil
+            reportedProblems = []
             createdNote = currentNote
             writeNote()
 
             tracksKept = keepAudio && keepSeparateTracks
             let meURL = tracksKept
                 ? audioURL(base, "me")
-                : FileManager.default.temporaryDirectory.appendingPathComponent("wingman-\(UUID().uuidString).wav")
+                : Self.scratchFile("wingman-\(UUID().uuidString).wav")
             meAudio = meURL
             let me = makeStream(.me, vad: vad, audio: meURL, mutedBy: muteFlag)
             let themURL = tracksKept
                 ? audioURL(base, "them")
-                : FileManager.default.temporaryDirectory.appendingPathComponent("wingman-\(UUID().uuidString).wav")
+                : Self.scratchFile("wingman-\(UUID().uuidString).wav")
             themAudio = themURL
             let them = makeStream(.them, vad: vad, audio: themURL)
 
             meSink = me
             themSink = them
+            speakersUsed = !AudioDeviceMonitor.outputIsHeadphones()
             do {
                 try startMic()
             } catch {
@@ -476,7 +499,7 @@ final class Recorder {
             try await separation.load()
             modelStatus = nil
         } catch {
-            Log.write("model download failed (will try again when recording): \(error)")
+            Log.write("model download failed (will try again when recording): \(Log.describe(error))")
             modelStatus = "Couldn't download Wingman's speech models. Check your internet connection — Wingman tries again when you record."
         }
     }
@@ -582,7 +605,7 @@ final class Recorder {
         } catch {
             // Often the device is still switching (e.g. AirPods changing mode):
             // try again shortly rather than leave the mic off for the meeting.
-            Log.write("mic restart failed: \(error)")
+            Log.write("mic restart failed: \(Log.describe(error))")
             if micRetries < 3 {
                 micRetries += 1
                 warning = "\(Self.micStopped) — trying again…"
@@ -605,6 +628,7 @@ final class Recorder {
         }
 
         let elapsed = startedAt.map { Self.timestamp(Date().timeIntervalSince($0)) } ?? ""
+        if !AudioDeviceMonitor.outputIsHeadphones() { speakersUsed = true }
         let output = AudioDeviceMonitor.defaultOutputName() ?? "new output"
         let input = AudioDeviceMonitor.defaultInputName() ?? "new microphone"
         notice = "Audio devices changed at \(elapsed) — now listening on \(input), call audio from \(output)."
@@ -641,7 +665,7 @@ final class Recorder {
         lastError = nil
         warning = nil
         notice = nil
-        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("wingman-import-\(UUID().uuidString).wav")
+        let scratch = Self.scratchFile("wingman-import-\(UUID().uuidString).wav")
         do {
             phase = .preparing("Loading speech model…")
             try await engine.load()
@@ -676,6 +700,9 @@ final class Recorder {
             endedAt = started.addingTimeInterval(Double(samples.count) / Resampler.sampleRate)
             currentNote = base.appendingPathExtension("md")
             noteWrittenAt = nil
+            noteSaved = false
+            noteSaveError = nil
+            reportedProblems = []
             tracksKept = false
             meAudio = nil
             themAudio = scratch
@@ -714,16 +741,27 @@ final class Recorder {
         phase = .finishing("Discarding…")
         await teardown()
         let fm = FileManager.default
+        var notTrashed = 0
         if let note = currentNote {
             let folder = note.deletingLastPathComponent()
             let base = note.deletingPathExtension().lastPathComponent
             for suffix in Self.companionSuffixes {
                 let url = folder.appendingPathComponent(base + suffix)
-                if fm.fileExists(atPath: url.path) { try? fm.trashItem(at: url, resultingItemURL: nil) }
+                guard fm.fileExists(atPath: url.path) else { continue }
+                do {
+                    try fm.trashItem(at: url, resultingItemURL: nil)
+                } catch {
+                    notTrashed += 1
+                    Log.write("couldn't move a discarded file to the Trash: \(Log.describe(error))")
+                }
             }
         }
-        for url in [meAudio, themAudio].compactMap({ $0 }) where fm.fileExists(atPath: url.path) {
-            try? fm.removeItem(at: url)
+        // Temporary tracks (audio not kept) are Wingman's own scratch files; kept
+        // tracks were handled above, and never get deleted outright.
+        if !tracksKept {
+            for url in [meAudio, themAudio].compactMap({ $0 }) where fm.fileExists(atPath: url.path) {
+                try? fm.removeItem(at: url)
+            }
         }
         meAudio = nil
         themAudio = nil
@@ -737,7 +775,9 @@ final class Recorder {
         meetingName = ""
         appliedName = ""
         nameFromCalendar = false
-        notice = "Recording discarded — its files are in the Trash."
+        notice = notTrashed == 0
+            ? "Recording discarded — its files are in the Trash."
+            : "Recording discarded, but \(notTrashed == 1 ? "one of its files" : "\(notTrashed) of its files") couldn't be moved to the Trash: \(notTrashed == 1 ? "it's" : "they're") still in the meeting's folder."
         phase = .idle
     }
 
@@ -764,9 +804,10 @@ final class Recorder {
             await compressTracks()
         } else if saved {
             for url in [meAudio, themAudio].compactMap({ $0 }) { try? FileManager.default.removeItem(at: url) }
-        } else {
-            keepTemporaryTracks()
+        } else if keepTemporaryTracks() {
             warning = (warning ?? "") + " The separate tracks were kept next to the note instead."
+        } else {
+            warning = (warning ?? "") + " The separate tracks couldn't be kept either."
         }
         meAudio = nil
         themAudio = nil
@@ -782,7 +823,7 @@ final class Recorder {
         let fm = FileManager.default
         for speaker in [Speaker.me, .them] {
             guard let track = speaker == .me ? meAudio : themAudio else { continue }
-            let copy = fm.temporaryDirectory.appendingPathComponent("wingman-\(UUID().uuidString).m4a")
+            let copy = Self.scratchFile("wingman-\(UUID().uuidString).m4a")
             do {
                 try await Task.detached(priority: .userInitiated) { try AudioMix.mix([track], to: copy) }.value
                 // Renaming the meeting meanwhile moves the track: follow it.
@@ -793,7 +834,7 @@ final class Recorder {
                 try fm.removeItem(at: current)
             } catch {
                 try? fm.removeItem(at: copy)
-                Log.write("couldn't compress the \(speaker) track, kept the WAV: \(error)")
+                Log.write("couldn't compress the \(speaker) track, kept the WAV: \(Log.describe(error))")
             }
         }
     }
@@ -826,24 +867,28 @@ final class Recorder {
             return true
         } catch {
             warning = "Couldn't save the combined audio (\(error.localizedDescription))."
-            Log.write("combined audio failed: \(error)")
+            Log.write("combined audio failed: \(Log.describe(error))")
             return false
         }
     }
 
     /// The combined audio failed: rather than delete the only copy of the
     /// meeting's audio, move the temporary tracks next to the note.
-    private func keepTemporaryTracks() {
-        guard let note = currentNote else { return }
+    /// Moves the temporary tracks next to the note; true when every one made it.
+    private func keepTemporaryTracks() -> Bool {
+        guard let note = currentNote else { return false }
         let base = note.deletingPathExtension()
+        var kept = true
         for (url, suffix) in [(meAudio, "me"), (themAudio, "them")] {
-            guard let url else { continue }
+            guard let url, FileManager.default.fileExists(atPath: url.path) else { continue }
             do {
                 try FileManager.default.moveItem(at: url, to: audioURL(base, suffix))
             } catch {
-                Log.write("couldn't keep the \(suffix) track: \(error)")
+                Log.write("couldn't keep the \(suffix) track: \(Log.describe(error))")
+                kept = false
             }
         }
+        return kept
     }
 
     /// The after-meeting language review (see LanguageReview): lines the live
@@ -946,7 +991,8 @@ final class Recorder {
     /// Creates the transcriber for one stream and returns the callback the
     /// audio thread uses to hand it samples (in order, without blocking).
     private func makeStream(_ speaker: Speaker, vad: VadManager, audio: URL?, mutedBy flag: LockedFlag? = nil) -> ([Float]) -> Void {
-        let stream = StreamTranscriber(speaker: speaker, engine: engine, vad: vad, audioFileURL: audio) { [weak self] event in
+        let stream = StreamTranscriber(speaker: speaker, engine: engine, vad: vad, audioFileURL: audio,
+                                       onProblem: { [weak self] problem in await self?.streamProblem(speaker, problem) }) { [weak self] event in
             await self?.handle(event)
         }
         let (input, continuation) = AsyncStream<StreamTranscriber.Feed>.makeStream(bufferingPolicy: .unbounded)
@@ -1028,6 +1074,8 @@ final class Recorder {
                                                     somethingPlaying: !CallDetector.processesPlayingAudio().isEmpty)
                 if missing != self.callAudioMissing {
                     self.callAudioMissing = missing
+                    // The remembered "allowed" may be stale (revoked in System Settings).
+                    if missing { UserDefaults.standard.removeObject(forKey: "systemAudioConfirmed") }
                     Log.write(missing ? "no call audio for a minute while something plays" : "call audio arriving")
                 }
                 if heard { return }
@@ -1046,6 +1094,18 @@ final class Recorder {
 
     private func handle(_ event: TranscriptEvent) {
         let index = lines.firstIndex { $0.id == event.utteranceID }
+        if event.isFinal && event.failed {
+            // Recognition failed, which isn't silence: keep what was shown so far, marked.
+            guard let index, !lines[index].text.isEmpty else {
+                if let index { lines.remove(at: index) }
+                return
+            }
+            lines[index].isFinal = true
+            lines[index].incomplete = true
+            lines[index].end = event.end
+            writeNote()
+            return
+        }
         if event.isFinal && event.text.isEmpty {
             if let index { lines.remove(at: index) }
             return
@@ -1068,35 +1128,101 @@ final class Recorder {
     /// Safety net for echo: if the mic picked up the call from the speakers,
     /// the same words show up as both "Them" and "Me" at the same moment.
     /// Keep the "Them" copy.
+    /// On speakers the microphone also hears the call. A line of yours that
+    /// clearly repeats theirs is that echo and goes; one that's only similar
+    /// stays, marked, since it may be a real reply ("We should *not* deploy").
     private func removeEchoes(around line: TranscriptLine) {
+        guard speakersUsed else { return }
         let others = lines.filter {
             $0.isFinal && $0.speaker != line.speaker
                 && $0.start < line.end + 1.5 && line.start < $0.end + 1.5
         }
-        for other in others where Self.isEcho(other.text, line.text) {
-            let echo = line.speaker == .me ? line : other
-            lines.removeAll { $0.id == echo.id }
+        for other in others {
+            let (mine, theirs) = line.speaker == .me ? (line, other) : (other, line)
+            switch Self.echoVerdict(mine: mine.text, theirs: theirs.text, delay: mine.start - theirs.start) {
+            case .echo:
+                lines.removeAll { $0.id == mine.id }
+            case .possible:
+                if let i = lines.firstIndex(where: { $0.id == mine.id }) { lines[i].possibleEcho = true }
+            case .none:
+                break
+            }
         }
     }
 
     /// Whether two lines said at about the same time are the same words. A
     /// short line counts only if it matches exactly: "Sí" is a real reply,
     /// not an echo, just because the other side also said "sí" in a sentence.
-    static func isEcho(_ a: String, _ b: String) -> Bool {
-        let wa = words(a), wb = words(b)
-        guard !wa.isEmpty, !wb.isEmpty else { return false }
-        if min(wa.count, wb.count) < 3 { return wa == wb }
-        return similarity(a, b) >= 0.6
+    enum EchoVerdict: Equatable {
+        case none
+        /// Similar, but maybe a real reply: kept, marked.
+        case possible
+        /// A clear repeat right after theirs: the call heard through the speakers.
+        case echo
     }
 
+    /// Whether my line is the call coming back through the speakers. Only a clear
+    /// repeat goes: at least three words, nearly the same words in the same
+    /// order, the same negations, starting with or just after theirs (`delay`
+    /// seconds). A line that merely shares most of its words (the old test) is
+    /// kept and marked: "I was right, you were wrong" isn't an echo of the reverse.
+    static func echoVerdict(mine: String, theirs: String, delay: TimeInterval) -> EchoVerdict {
+        let a = words(mine), b = words(theirs)
+        guard !a.isEmpty, !b.isEmpty else { return .none }
+        let lengthRatio = Double(min(a.count, b.count)) / Double(max(a.count, b.count))
+        if (-0.5...1.5).contains(delay), a.count >= 3, lengthRatio >= 0.75,
+           orderedSimilarity(a, b) >= 0.85, negations(a) == negations(b) {
+            return .echo
+        }
+        let sa = Set(a), sb = Set(b)
+        let shared = min(sa.count, sb.count) < 3
+            ? sa == sb
+            : similarity(mine, theirs) >= 0.6
+        return shared ? .possible : .none
+    }
+
+    /// Shared words over the shorter line's, regardless of order.
     static func similarity(_ a: String, _ b: String) -> Double {
-        let wa = words(a), wb = words(b)
+        let wa = Set(words(a)), wb = Set(words(b))
         guard !wa.isEmpty, !wb.isEmpty else { return 0 }
         return Double(wa.intersection(wb).count) / Double(min(wa.count, wb.count))
     }
 
-    private static func words(_ s: String) -> Set<String> {
-        Set(s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
+    /// 1 minus the word-level edit distance over the longer line's length.
+    static func orderedSimilarity(_ a: [String], _ b: [String]) -> Double {
+        guard !a.isEmpty, !b.isEmpty else { return 0 }
+        var previous = Array(0...b.count)
+        for i in 1...a.count {
+            var current = [i] + Array(repeating: 0, count: b.count)
+            for j in 1...b.count {
+                current[j] = a[i - 1] == b[j - 1]
+                    ? previous[j - 1]
+                    : 1 + min(previous[j - 1], previous[j], current[j - 1])
+            }
+            previous = current
+        }
+        return 1 - Double(previous[b.count]) / Double(max(a.count, b.count))
+    }
+
+    /// Words that flip a sentence's meaning, in the languages Wingman hears most.
+    private static let negationWords: Set<String> = [
+        "not", "no", "never", "nothing", "none", "nor", "cannot", "can't", "don't", "doesn't", "didn't", "won't",
+        "isn't", "aren't", "wasn't", "weren't", "shouldn't", "wouldn't", "couldn't", "haven't", "hasn't", "hadn't",
+        "nunca", "jamás", "tampoco", "ni", "nada", "ningún", "ninguna", "ninguno",
+        "não", "nem", "nenhum", "nenhuma",
+        "ne", "pas", "jamais", "rien", "nicht", "kein", "keine", "nie", "niemals", "non", "mai",
+    ]
+
+    private static func negations(_ words: [String]) -> [String] {
+        words.filter(negationWords.contains)
+    }
+
+    /// Lowercased words; apostrophes stay inside them ("don't" is one word).
+    private static func words(_ s: String) -> [String] {
+        s.lowercased().replacingOccurrences(of: "’", with: "'")
+            .split { !$0.isLetter && !$0.isNumber && $0 != "'" }
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "'")) }
+            .filter { !$0.isEmpty }
     }
 
     // MARK: - Files
@@ -1144,11 +1270,53 @@ final class Recorder {
         return folder.appendingPathComponent(name.isEmpty ? prefix : "\(prefix) \(name)")
     }
 
-    private static func fileSafe(_ name: String) -> String {
+    /// Wingman's own folder for audio it only needs while working — the tracks of
+    /// a meeting whose audio isn't kept, file imports, compression — so a crash
+    /// can't leave meeting audio lying around: whatever is here at launch goes.
+    static let scratchFolder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Wingman/Recording", isDirectory: true)
+
+    static func scratchFile(_ name: String) -> URL {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: scratchFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // Also for a folder that already existed: only you can open meeting audio.
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scratchFolder.path)
+        return scratchFolder.appendingPathComponent(name)
+    }
+
+    /// At launch nothing is being recorded, so scratch audio still here (and,
+    /// from versions before 0.8.1, in the temporary folder) was left by a crash.
+    func removeLeftoverScratch() {
+        guard phase == .idle else { return }
+        let fm = FileManager.default
+        var leftovers = (try? fm.contentsOfDirectory(at: Self.scratchFolder, includingPropertiesForKeys: nil)) ?? []
+        leftovers += ((try? fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("wingman-") && ["wav", "m4a"].contains($0.pathExtension) }
+        var removed = 0
+        for url in leftovers where (try? fm.removeItem(at: url)) != nil { removed += 1 }
+        if removed > 0 { Log.write("removed \(removed) leftover scratch audio file\(removed == 1 ? "" : "s") from an earlier session") }
+        if removed < leftovers.count { Log.write("couldn't remove \(leftovers.count - removed) leftover scratch audio file(s)") }
+    }
+
+    /// A meeting name usable in a file name: no separators, and short enough —
+    /// counted in bytes, which is what the 255-byte file-name limit measures — that
+    /// the time prefix and the longest suffix ("-them.wav") always fit.
+    static func fileSafe(_ name: String) -> String {
         let cleaned = name.components(separatedBy: CharacterSet(charactersIn: "/:\\\n\r\t")).joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
-        return String(cleaned.prefix(80))
+        var kept = ""
+        var bytes = 0
+        for character in cleaned.prefix(80) {
+            let size = String(character).utf8.count
+            guard bytes + size <= maxNameBytes else { break }
+            kept.append(character)
+            bytes += size
+        }
+        return kept.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
     }
+
+    /// 255 bytes minus the prefix ("HH-mm (99) ") and suffix, with room to spare.
+    static let maxNameBytes = 200
 
     private static let companionSuffixes = [".md", ".m4a", "-me.m4a", "-them.m4a", "-me.wav", "-them.wav", ".vtt", ".srt"]
 
@@ -1342,20 +1510,40 @@ final class Recorder {
             .appendingPathComponent("\(base.lastPathComponent)-\(suffix).wav")
     }
 
-    private func writeNote() {
-        guard let currentNote, let startedAt else { return }
+    /// Writes the note. A failure is shown in the window (with Save Note As…)
+    /// and clears `noteSaved`, so no notification or report claims it was saved.
+    @discardableResult
+    private func writeNote() -> Bool {
+        guard let currentNote, let text = noteText() else { return false }
         // After the meeting the note is yours: an edit made in another app, or
         // moving the note to the Trash, wins over a later change in Wingman.
         if phase == .idle, let written = noteWrittenAt {
             guard let modified = Self.modificationDate(currentNote) else {
                 notice = "The note was moved or deleted outside Wingman, so this change wasn't saved to it."
-                return
+                return false
             }
             guard modified == written else {
                 notice = "The note was edited outside Wingman, so this change wasn't saved to it (your edits are kept)."
-                return
+                return false
             }
         }
+        do {
+            try text.write(to: currentNote, atomically: true, encoding: .utf8)
+            noteWrittenAt = Self.modificationDate(currentNote)
+            noteSaved = true
+            noteSaveError = nil
+            return true
+        } catch {
+            Log.write("couldn't write the note: \(Log.describe(error))")
+            noteSaved = false
+            noteSaveError = "Wingman couldn't save the note (\(error.localizedDescription)). The transcript is still here: use Save Note As… to keep a copy."
+            return false
+        }
+    }
+
+    /// The note's Markdown, from the meeting in the window.
+    private func noteText() -> String? {
+        guard let startedAt else { return nil }
         let minutes = Int((endedAt ?? Date()).timeIntervalSince(startedAt) / 60)
         let title = meetingName.trimmingCharacters(in: .whitespaces).isEmpty ? "Meeting" : meetingName
         var text = """
@@ -1375,17 +1563,42 @@ final class Recorder {
         }
         text += "\n## Transcript\n"
         for line in lines where line.isFinal {
-            let flag = line.isUnclear ? " *(unclear)*" : ""
+            let flag = line.incomplete ? " *(incomplete)*" : line.possibleEcho ? " *(possible echo)*" : line.isUnclear ? " *(unclear)*" : ""
             text += "\n[\(Self.timestamp(line.start))] **\(displayName(line)):** \(line.text)\(flag)\n"
         }
-        if lines.contains(where: \.isUnclear) {
-            text += "\n---\n*(unclear)* marks lines the speech model wasn't confident about; check them against the audio.\n"
-        }
-        do {
-            try text.write(to: currentNote, atomically: true, encoding: .utf8)
-            noteWrittenAt = Self.modificationDate(currentNote)
-        } catch {
-            Log.write("couldn't write the note: \(error)")
+        let final = lines.filter(\.isFinal)
+        var marks: [String] = []
+        if final.contains(where: \.isUnclear) { marks.append("*(unclear)* marks lines the speech model wasn't confident about; check them against the audio.") }
+        if final.contains(where: \.incomplete) { marks.append("*(incomplete)* marks lines the speech model failed on; the text is what it had heard so far.") }
+        if final.contains(where: \.possibleEcho) { marks.append("*(possible echo)* marks your lines that may be the call coming back through your speakers.") }
+        if !marks.isEmpty { text += "\n---\n" + marks.joined(separator: "  \n") + "\n" }
+        return text
+    }
+
+    /// Save Note As…: the note somewhere else, when it couldn't be saved where it belongs.
+    func saveNoteCopy(to url: URL) throws {
+        guard let text = noteText() else { return }
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        notice = "Saved a copy of the note as \(url.lastPathComponent)."
+        Log.write("note saved elsewhere (user choice)")
+    }
+
+    /// Something a stream couldn't fix by itself: say so once per kind and track.
+    private func streamProblem(_ speaker: Speaker, _ problem: StreamProblem) {
+        guard phase != .idle else { return }
+        let side = speaker == .me ? "your microphone's" : "the call's"
+        switch problem {
+        case .audioFile(let what):
+            guard reportedProblems.insert("audio \(speaker)").inserted else { return }
+            Log.write("couldn't save the \(speaker == .me ? "microphone" : "call") audio: \(what)")
+            warning = "Wingman couldn't save \(side) audio, so this meeting's audio may be missing or incomplete (is the disk full?). The transcript is still being saved."
+        case .recognition:
+            guard reportedProblems.insert("recognition").inserted else { return }
+            warning = "Wingman's speech recognition failed on some lines; what it had heard of them is kept, marked (incomplete)."
+        case .voiceDetection:
+            guard reportedProblems.insert("detection \(speaker)").inserted else { return }
+            Log.write("voice detection keeps failing (\(speaker == .me ? "microphone" : "call"))")
+            warning = "Wingman's voice detection isn't working for \(side) audio, so some speech may be missing from the transcript (the audio is still saved)."
         }
     }
 

@@ -33,7 +33,7 @@ final class MicCapture {
                     try startEngine(voiceProcessing: true, routeThroughMixer: routeThroughMixer, onSamples: onSamples)
                     return .echoCancelled
                 } catch {
-                    Log.write("echo-cancelled mic failed (routeThroughMixer=\(routeThroughMixer)): \(error)")
+                    Log.write("echo-cancelled mic failed (routeThroughMixer=\(routeThroughMixer)): \(Log.describe(error))")
                     reset()
                 }
             }
