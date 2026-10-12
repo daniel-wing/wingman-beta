@@ -1,5 +1,23 @@
 # Release notes
 
+## 0.8.2 — a frozen window no longer costs a recording
+
+A fix for a tester's call: the Wingman window froze while it was being resized, and the
+recording stopped with it.
+
+- **The recording keeps going even if the window freezes.** Each meeting's audio is now
+  saved apart from the window and from transcription, so a busy or frozen window can
+  only delay what you see, never what's recorded.
+- **Meeting audio survives a crash or a force quit.** The audio files stay playable while
+  they're being recorded. If Wingman is stopped mid-meeting anyway, it finishes that
+  meeting's audio the next time it opens (including meetings 0.8.1 left unfinished) and
+  says so.
+- **Resizing the window during a call is lighter:** the transcript pauses while you drag
+  the window's edge and catches up when you let go, and only finished lines are
+  selectable.
+- **If the window ever stops responding again**, Wingman's log says so with a few
+  details (no meeting content), so the problem can be found.
+
 ## 0.8.1 — safer by default
 
 Fixes from an outside review of 0.8.0, mostly about privacy and not losing a meeting:

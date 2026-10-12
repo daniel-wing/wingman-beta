@@ -136,8 +136,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminate.setEventHandler { NSApp.terminate(nil) }
         terminate.resume()
         terminateSignal = terminate
+        // Before call detection can start a recording: what a crash left unfinished.
+        recorder.recoverInterruptedRecordings()
         watcher.start()
-        recorder.removeLeftoverScratch()
+        MainThreadWatchdog.shared.start { [recorder] in
+            MainThreadWatchdog.currentContext(lines: recorder.lines.count, recording: recorder.isRecording)
+        }
         recorder.cleanUpAudio()
         #if !APP_STORE
         callMute.start()

@@ -98,7 +98,10 @@ final class Recorder {
             Log.write("\(app.shortName.capitalized) mute on — Wingman following")
             // Detection lags slightly behind the click: erase what was said just before.
             // The erase travels with the audio, so it lands exactly where the mute was noticed.
-            if !wasMuted, !callMuteIgnored { feeds[.me]?.yield(.redact(seconds: 0.5)) }
+            if !wasMuted, !callMuteIgnored {
+                writers[.me]?.redact(seconds: 0.5)
+                feeds[.me]?.yield(.redact(seconds: 0.5))
+            }
         } else {
             Log.write("call mute off — Wingman following")
         }
@@ -287,6 +290,12 @@ final class Recorder {
     private var feeders: [Task<Void, Never>] = []
     /// Each stream's input: audio, plus erase requests kept in order with it.
     private var feeds: [Speaker: AsyncStream<StreamTranscriber.Feed>.Continuation] = [:]
+    /// Each track's writer, fed before transcription (see `TrackWriter`).
+    private var writers: [Speaker: TrackWriter] = [:]
+    private var events: AsyncStream<TranscriptEvent>.Continuation?
+    private var eventConsumer: Task<Void, Never>?
+    /// Recovery at launch is running: the audio clean-up waits for it.
+    private var recovering = false
     private var silenceCheck: Task<Void, Never>?
     private var micSilenceCheck: Task<Void, Never>?
     private var deviceMonitor: AudioDeviceMonitor?
@@ -438,13 +447,14 @@ final class Recorder {
             tracksKept = keepAudio && keepSeparateTracks
             let meURL = tracksKept
                 ? audioURL(base, "me")
-                : Self.scratchFile("wingman-\(UUID().uuidString).wav")
+                : Self.scratchFile("wingman-\(recordingID.uuidString)-me.wav")
             meAudio = meURL
             let me = makeStream(.me, vad: vad, audio: meURL, mutedBy: muteFlag)
             let themURL = tracksKept
                 ? audioURL(base, "them")
-                : Self.scratchFile("wingman-\(UUID().uuidString).wav")
+                : Self.scratchFile("wingman-\(recordingID.uuidString)-them.wav")
             themAudio = themURL
+            saveRecoveryRecord()
             let them = makeStream(.them, vad: vad, audio: themURL)
 
             meSink = me
@@ -650,6 +660,7 @@ final class Recorder {
         for url in [themAudio, meAudio].compactMap({ $0 }) { try? FileManager.default.removeItem(at: url) }
         themAudio = nil
         meAudio = nil
+        RecordingRecovery.remove(id: recordingID, in: Self.scratchFolder)
         currentNote = nil
         startedAt = nil
     }
@@ -763,6 +774,7 @@ final class Recorder {
                 try? fm.removeItem(at: url)
             }
         }
+        RecordingRecovery.remove(id: recordingID, in: Self.scratchFolder)
         meAudio = nil
         themAudio = nil
         lines = []
@@ -811,8 +823,56 @@ final class Recorder {
         }
         meAudio = nil
         themAudio = nil
+        RecordingRecovery.remove(id: recordingID, in: Self.scratchFolder)
         phase = .idle
         cleanUpAudio()
+    }
+
+    /// What the next launch needs to finish this recording's audio if Wingman
+    /// doesn't get to (see `RecordingRecovery`).
+    private func saveRecoveryRecord() {
+        guard let note = currentNote, isRecording || phase != .idle else { return }
+        let record = RecordingRecovery.Record(note: note, tracks: [meAudio, themAudio].compactMap { $0 }, keepAudio: keepAudio,
+                                              tracksKept: tracksKept, started: startedAt ?? Date())
+        RecordingRecovery.save(record, id: recordingID, in: Self.scratchFolder)
+    }
+
+    /// At launch, before anything can start recording: finishes the audio of
+    /// recordings Wingman didn't get to finish, then clears old scratch audio.
+    func recoverInterruptedRecordings() {
+        let records = RecordingRecovery.leftovers(in: Self.scratchFolder)
+        // Tracks a record covers are its own, not orphans.
+        let covered = Set(records.flatMap(\.record.tracks).map(\.standardizedFileURL))
+        let orphans = RecordingRecovery.orphanedTracks(in: Self.notesFolder).compactMap { orphan -> RecordingRecovery.Record? in
+            var orphan = orphan
+            orphan.tracks.removeAll { covered.contains($0.standardizedFileURL) }
+            return orphan.tracks.isEmpty ? nil : orphan
+        }
+        guard !records.isEmpty || !orphans.isEmpty else {
+            removeLeftoverScratch()
+            return
+        }
+        Log.write("finishing the audio of \(records.count + orphans.count) interrupted recording(s)")
+        let all = records.map(\.record) + orphans
+        recovering = true
+        Task {
+            var recovered = 0
+            for (i, record) in all.enumerated() {
+                let outcome = await Task.detached(priority: .utility) { RecordingRecovery.finish(record) }.value
+                if i < records.count { try? FileManager.default.removeItem(at: records[i].url) }
+                Log.write(String(format: "finished an interrupted recording: %.0f s of audio, combined audio %@",
+                                 outcome.seconds, outcome.combinedSaved ? "saved" : "not saved"))
+                if outcome.seconds > 0 { recovered += 1 }
+            }
+            recovering = false
+            removeLeftoverScratch()
+            cleanUpAudio()
+            if recovered > 0, notice == nil {
+                notice = recovered == 1
+                    ? "Wingman stopped during a meeting before it could finish. Its audio was recovered and saved next to its note."
+                    : "Wingman stopped during \(recovered) meetings before it could finish them. Their audio was recovered and saved next to their notes."
+            }
+        }
     }
 
     /// The separate tracks are recorded as WAV next to the note, so they survive
@@ -843,7 +903,7 @@ final class Recorder {
     /// while a meeting is recording or finishing, and never to the meeting in
     /// the window.
     func cleanUpAudio() {
-        guard phase == .idle, removeAudioAfterDays > 0 || audioLimitGB > 0 else { return }
+        guard phase == .idle, !recovering, removeAudioAfterDays > 0 || audioLimitGB > 0 else { return }
         let keep = Set([currentNote].compactMap { $0.map(AudioCleanup.key(for:)) })
         let (days, limit, folder, previous) = (removeAudioAfterDays, audioLimitGB, Self.notesFolder, cleanup)
         cleanup = Task.detached(priority: .utility) {
@@ -983,25 +1043,61 @@ final class Recorder {
         feeds.values.forEach { $0.finish() }
         for feeder in feeders { await feeder.value }
         for stream in streams { await stream.finish() }
+        for writer in writers.values { writer.finish() }
+        // Every line the streams produced is in `lines` before the meeting is finished.
+        events?.finish()
+        await eventConsumer?.value
+        events = nil
+        eventConsumer = nil
+        writers = [:]
         feeds = [:]
         feeders = []
         streams = []
     }
 
+    /// Transcript events reach the window in order through one queue, without the
+    /// streams ever waiting for the main thread: a busy window delays the
+    /// transcript on screen, never the transcription or the audio.
+    private func startEvents() {
+        let (stream, continuation) = AsyncStream<TranscriptEvent>.makeStream(bufferingPolicy: .unbounded)
+        events = continuation
+        eventConsumer = Task { @MainActor [weak self] in
+            for await event in stream { self?.handle(event) }
+        }
+    }
+
     /// Creates the transcriber for one stream and returns the callback the
     /// audio thread uses to hand it samples (in order, without blocking).
     private func makeStream(_ speaker: Speaker, vad: VadManager, audio: URL?, mutedBy flag: LockedFlag? = nil) -> ([Float]) -> Void {
-        let stream = StreamTranscriber(speaker: speaker, engine: engine, vad: vad, audioFileURL: audio,
-                                       onProblem: { [weak self] problem in await self?.streamProblem(speaker, problem) }) { [weak self] event in
-            await self?.handle(event)
+        if events == nil { startEvents() }
+        let events = events
+        let stream = StreamTranscriber(speaker: speaker, engine: engine, vad: vad, onProblem: { [weak self] problem in
+            Task { @MainActor in self?.streamProblem(speaker, problem) }
+        }) { event in
+            events?.yield(event)
         }
+        // The track is written from the capture thread's side, ahead of transcription.
+        var writer: TrackWriter?
+        if let audio {
+            do {
+                writer = try TrackWriter(url: audio) { [weak self] problem in
+                    Task { @MainActor in self?.streamProblem(speaker, .audioFile(problem)) }
+                }
+            } catch {
+                streamProblem(speaker, .audioFile("couldn't create the file: \(Log.describe(error))"))
+            }
+        }
+        writers[speaker] = writer
         let (input, continuation) = AsyncStream<StreamTranscriber.Feed>.makeStream(bufferingPolicy: .unbounded)
         feeders.append(Task.detached(priority: .userInitiated) {
             for await item in input { await stream.take(item) }
         })
         streams.append(stream)
         feeds[speaker] = continuation
-        let aligner = ClockAligner { continuation.yield(.samples($0)) }
+        let aligner = ClockAligner { samples in
+            writer?.append(samples)
+            continuation.yield(.samples(samples))
+        }
         // Muted audio becomes silence rather than a gap, so the tracks stay aligned.
         let sound = speaker == .me ? micSound : nil
         let level = speaker == .me ? micLevel : nil
@@ -1376,6 +1472,7 @@ final class Recorder {
         currentNote = newNote
         appliedName = meetingName
         lastError = failed
+        saveRecoveryRecord()
         writeNote()
     }
 

@@ -18,7 +18,7 @@ enum Simulate {
             try await engine.load()
             let collector = Collector()
             let stream = StreamTranscriber(
-                speaker: .them, engine: engine, vad: try await VadManager(), audioFileURL: nil
+                speaker: .them, engine: engine, vad: try await VadManager()
             ) { event in
                 if event.isFinal {
                     await collector.add(event)

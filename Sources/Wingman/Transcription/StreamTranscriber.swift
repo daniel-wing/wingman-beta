@@ -31,7 +31,9 @@ enum StreamProblem: Sendable {
     case voiceDetection
 }
 
-/// Turns one audio stream (mic or system audio) into transcript lines.
+/// Turns one audio stream (mic or system audio) into transcript lines. The
+/// audio itself is saved elsewhere (`TrackWriter`), so a slow model or a busy
+/// window never holds up the recording.
 ///
 /// Silero voice-activity detection splits the stream into utterances. While
 /// someone is talking, the utterance so far is re-transcribed about once a
@@ -56,10 +58,6 @@ actor StreamTranscriber {
     private let vad: VadManager
     private let emit: @Sendable (TranscriptEvent) async -> Void
     private let onProblem: (@Sendable (StreamProblem) async -> Void)?
-    private let audioFile: AVAudioFile?
-    /// An audio file was asked for but couldn't be created.
-    private let audioFileMissing: Bool
-    private var audioProblemReported = false
     private var recognitionFailures = 0
     private var detectionFailures = 0
 
@@ -73,9 +71,6 @@ actor StreamTranscriber {
     private var utteranceStart = 0
     private var utteranceID = UUID()
     private var lastPartialLength = 0
-    /// The newest audio, held back from the file so `redactRecent` can still erase it.
-    private var unwritten: [Float] = []
-    private static let holdBack = 8_000  // 0.5 s
 
     /// Loudest sample seen; lets the UI warn when system audio is silent (permission missing).
     private(set) var peak: Float = 0
@@ -84,7 +79,6 @@ actor StreamTranscriber {
         speaker: Speaker,
         engine: ParakeetEngine,
         vad: VadManager,
-        audioFileURL: URL?,
         onProblem: (@Sendable (StreamProblem) async -> Void)? = nil,
         emit: @escaping @Sendable (TranscriptEvent) async -> Void
     ) {
@@ -93,12 +87,6 @@ actor StreamTranscriber {
         self.vad = vad
         self.emit = emit
         self.onProblem = onProblem
-        let file = audioFileURL.flatMap {
-            try? AVAudioFile(forWriting: $0, settings: Resampler.outputFormat.settings,
-                             commonFormat: .pcmFormatFloat32, interleaved: false)
-        }
-        self.audioFile = file
-        self.audioFileMissing = audioFileURL != nil && file == nil
     }
 
     /// What a stream is fed: audio, or a request to erase the latest audio.
@@ -117,11 +105,6 @@ actor StreamTranscriber {
     }
 
     func feed(_ samples: [Float]) async {
-        unwritten += samples
-        if unwritten.count > Self.holdBack {
-            await save(Array(unwritten.prefix(unwritten.count - Self.holdBack)))
-            unwritten.removeFirst(unwritten.count - Self.holdBack)
-        }
         for sample in samples where abs(sample) > peak { peak = abs(sample) }
         pending += samples
         // Walk through with an offset and drop the processed part once: removing
@@ -136,7 +119,8 @@ actor StreamTranscriber {
     }
 
     /// Silences the most recent `seconds` of audio that hasn't been transcribed
-    /// or saved yet — used when the user turns out to have muted a moment ago.
+    /// yet — used when the user turns out to have muted a moment ago (the track
+    /// is erased by its `TrackWriter`).
     /// Send it as a `Feed` so it can't overtake audio still on its way.
     func redactRecent(seconds: Double) {
         var remaining = Int(seconds * Resampler.sampleRate)
@@ -146,7 +130,6 @@ actor StreamTranscriber {
             for i in (buffer.count - n)..<buffer.count { buffer[i] = 0 }
         }
         let budget = remaining
-        zeroTail(&unwritten)
         // `pending` and `utterance` hold the same recent audio in transcription order:
         // newest in `pending`, older in the utterance (or the pre-roll when not speaking).
         zeroTail(&pending)
@@ -163,8 +146,6 @@ actor StreamTranscriber {
 
     /// Flushes whatever is still being said when recording stops.
     func finish() async {
-        await save(unwritten)
-        unwritten.removeAll()
         if inSpeech {
             utterance += pending
             pending.removeAll()
@@ -253,31 +234,5 @@ actor StreamTranscriber {
         await emit(TranscriptEvent(
             utteranceID: utteranceID, speaker: speaker, start: start, end: end, text: text, isFinal: isFinal,
             confidence: confidence))
-    }
-
-    /// Writes to the track's audio file; the first problem is reported once.
-    private func save(_ samples: [Float]) async {
-        guard let failure = write(samples), !audioProblemReported else { return }
-        audioProblemReported = true
-        await onProblem?(.audioFile(failure))
-    }
-
-    /// nil when written (or no file was asked for), else what went wrong.
-    private func write(_ samples: [Float]) -> String? {
-        guard !samples.isEmpty else { return nil }
-        guard let audioFile else { return audioFileMissing ? "couldn't create the file" : nil }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: Resampler.outputFormat,
-                                            frameCapacity: AVAudioFrameCount(samples.count))
-        else { return nil }
-        samples.withUnsafeBufferPointer { src in
-            buffer.floatChannelData![0].update(from: src.baseAddress!, count: samples.count)
-        }
-        buffer.frameLength = AVAudioFrameCount(samples.count)
-        do {
-            try audioFile.write(from: buffer)
-            return nil
-        } catch {
-            return "couldn't write: \(Log.describe(error))"
-        }
     }
 }

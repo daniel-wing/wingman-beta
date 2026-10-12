@@ -8,6 +8,10 @@ struct TranscriptView: View {
     let reporter: ProblemReporter
     let shortcut: GlobalShortcut
     @FocusState private var nameFocused: Bool
+    /// The lines as they were when the window started being resized: while the
+    /// edge is dragged, the list only re-measures, without new text or scrolling
+    /// on top. New lines appear when it's let go.
+    @State private var frozen: [TranscriptLine]?
     @Environment(\.openSettings) private var openSettings
 
     /// The in-window question for a call waiting for an answer.
@@ -239,7 +243,10 @@ struct TranscriptView: View {
             HStack(spacing: 10) {
                 Label(text, systemImage: icon)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    // At most two lines, no fixed height: a never-truncate line
+                    // makes the window's minimum size depend on its width, which
+                    // the window's live resize keeps renegotiating.
+                    .lineLimit(2)
                 Spacer(minLength: 8)
                 Button(button, action: action)
                     .controlSize(.small)
@@ -348,7 +355,7 @@ struct TranscriptView: View {
                                 .padding(.top, 40)
                         }
                     }
-                    ForEach(recorder.lines) { line in
+                    ForEach(frozen ?? recorder.lines) { line in
                         LineView(
                             line: line,
                             name: recorder.displayName(line),
@@ -363,10 +370,17 @@ struct TranscriptView: View {
                     }
                 }
                 .padding(12)
-                .textSelection(.enabled)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.willStartLiveResizeNotification)) { note in
+                guard (note.object as? NSWindow)?.identifier?.rawValue == "transcript" else { return }
+                frozen = recorder.lines
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEndLiveResizeNotification)) { note in
+                guard (note.object as? NSWindow)?.identifier?.rawValue == "transcript" else { return }
+                frozen = nil
             }
             .onChange(of: recorder.lines.last?.text) {
-                if let last = recorder.lines.last {
+                if frozen == nil, let last = recorder.lines.last {
                     withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
@@ -417,16 +431,25 @@ private struct LineView: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        // Top alignment, not first-baseline: lining up the baselines of
+        // selectable text makes SwiftUI measure each line's AppKit text view on
+        // every layout pass, which (with live resizing) froze 0.8.1. The small
+        // offsets put the smaller timestamp and name on the text's first line.
+        HStack(alignment: .top, spacing: 8) {
             Text(Recorder.timestamp(line.start))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.tertiary)
+                .padding(.top, 2)
             speaker
                 .frame(width: 90, alignment: .leading)
+                .padding(.top, 1)
             Text(line.text)
                 .foregroundStyle(line.isFinal && !line.isUnclear ? .primary : .secondary)
                 .italic(!line.isFinal)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Only finished lines can be selected: the live line changes
+                // several times a second, and its selection view with it.
+                .selectable(line.isFinal)
             if line.incomplete {
                 Image(systemName: "exclamationmark.bubble.fill")
                     .foregroundStyle(.orange)
@@ -625,5 +648,12 @@ private struct MeetingDetails: View {
             }
         }
         .font(.caption)
+    }
+}
+
+private extension View {
+    /// Text selection on or off (the two settings are different types).
+    @ViewBuilder func selectable(_ on: Bool) -> some View {
+        if on { textSelection(.enabled) } else { textSelection(.disabled) }
     }
 }
