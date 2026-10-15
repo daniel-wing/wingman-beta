@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import Wingman
@@ -137,12 +138,23 @@ private func line(_ speaker: Speaker, _ start: TimeInterval, _ end: TimeInterval
     }
 
     @Test func aDisagreementIsNeverDeleted() {
-        // The review's examples: one word flips the meaning.
-        #expect(Recorder.echoVerdict(mine: "We should not deploy today", theirs: "We should deploy today", delay: 0.3) == .possible)
-        #expect(Recorder.echoVerdict(mine: "I cannot approve this", theirs: "I can approve this", delay: 0.3) == .possible)
-        #expect(Recorder.echoVerdict(mine: "We don't ship on Friday", theirs: "We ship on Friday", delay: 0.3) == .possible)
+        // An added "not" is a reply, not an echo: kept, and not even marked.
+        #expect(Recorder.echoVerdict(mine: "We should not deploy today", theirs: "We should deploy today", delay: 0.3) == .none)
+        #expect(Recorder.echoVerdict(mine: "I cannot approve this", theirs: "I can approve this", delay: 0.3) == .none)
+        #expect(Recorder.echoVerdict(mine: "I can't approve this", theirs: "I can approve this", delay: 0.3) == .none)
+        #expect(Recorder.echoVerdict(mine: "I can not approve this", theirs: "I can approve this", delay: 0.3) == .none)
+        #expect(Recorder.echoVerdict(mine: "We don't ship on Friday", theirs: "We ship on Friday", delay: 0.3) == .none)
+        #expect(Recorder.echoVerdict(mine: "No puedo aprobar esto", theirs: "Puedo aprobar esto", delay: 0.3) == .none)
+        // One "not" fewer: recognition may have dropped it from a real echo, so it stays marked.
+        #expect(Recorder.echoVerdict(mine: "We should deploy today", theirs: "We should not deploy today", delay: 0.3) == .possible)
         // Same words, opposite order.
         #expect(Recorder.echoVerdict(mine: "I was right, you were wrong", theirs: "you were right, I was wrong", delay: 0.2) == .possible)
+    }
+
+    @Test func everyWayOfSayingNotIsTheSame() {
+        // Their "cannot" heard back as "can't" is still an echo.
+        #expect(Recorder.echoVerdict(mine: "I can't approve this today", theirs: "I cannot approve this today", delay: 0.2) == .echo)
+        #expect(Recorder.expanded(["don't", "won't", "cannot"]) == ["do", "not", "will", "not", "can", "not"])
     }
 
     @Test func timingAndShortLines() {
@@ -175,5 +187,30 @@ private func line(_ speaker: Speaker, _ start: TimeInterval, _ end: TimeInterval
     @Test func warningGoesOnceAudioArrivesOrNothingPlays() {
         #expect(!Recorder.callAudioMissing(heard: true, waited: 90, somethingPlaying: true))
         #expect(!Recorder.callAudioMissing(heard: false, waited: 90, somethingPlaying: false))
+    }
+}
+
+@Suite struct SeparationInputTests {
+    /// A meeting's call track kept as .m4a (AAC) must get its dithered copy too:
+    /// without it, separation finds extra speakers.
+    @Test func ditheredCopyOfAnM4A() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("wingman-dither-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let input = folder.appendingPathComponent("them.m4a")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        do {
+            let file = try AVAudioFile(forWriting: input, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16_000,
+                                                                       AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 32_000])
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000)!
+            buffer.frameLength = 16_000
+            for i in 0..<16_000 { buffer.floatChannelData![0][i] = i < 8_000 ? 0 : Float(sin(Double(i) * 0.1)) * 0.3 }
+            try file.write(from: buffer)
+        }
+        let output = folder.appendingPathComponent("copy.wav")
+        try SpeakerSeparation.writeDithered(input, to: output)
+        let copy = try AVAudioFile(forReading: output)
+        #expect(copy.length > 8_000)
+        #expect(copy.fileFormat.settings[AVFormatIDKey] as? UInt32 == kAudioFormatLinearPCM)
     }
 }

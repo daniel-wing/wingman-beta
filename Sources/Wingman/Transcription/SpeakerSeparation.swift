@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreML
 import FluidAudio
 import Foundation
 
@@ -12,12 +13,21 @@ actor SpeakerSeparation {
     }
 
     private var manager: OfflineDiarizerManager?
+    /// Where the models run. A search in the background stays off the GPU, which
+    /// the windows need to draw (using it there left the Meetings window blank).
+    private let computeUnits: MLComputeUnits
+
+    init(computeUnits: MLComputeUnits = .all) {
+        self.computeUnits = computeUnits
+    }
 
     /// Downloads the voice models on first use (~30 MB, cached afterwards).
     func load() async throws {
         guard manager == nil else { return }
         let manager = OfflineDiarizerManager(config: .default)
-        try await manager.prepareModels()
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = computeUnits
+        try await manager.prepareModels(configuration: configuration)
         self.manager = manager
     }
 
@@ -54,7 +64,9 @@ actor SpeakerSeparation {
     nonisolated static func writeDithered(_ input: URL, to output: URL) throws {
         let reader = try AVAudioFile(forReading: input)
         let format = reader.processingFormat
-        let writer = try AVAudioFile(forWriting: output, settings: reader.fileFormat.settings,
+        // Uncompressed float, whatever the input is: the file's own settings
+        // would be AAC for a meeting's .m4a, which can't be written as WAV.
+        let writer = try AVAudioFile(forWriting: output, settings: format.settings,
                                      commonFormat: format.commonFormat, interleaved: format.isInterleaved)
         guard format.commonFormat == .pcmFormatFloat32,
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1 << 18)

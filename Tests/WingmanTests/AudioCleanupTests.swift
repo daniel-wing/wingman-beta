@@ -108,3 +108,73 @@ private func meeting(_ key: String, daysAgo: Double, mb: Int64) -> AudioCleanup.
         #expect(abs(Double(file.length) / file.processingFormat.sampleRate - 10) < 0.2)
     }
 }
+
+@Suite struct NoteNamingTests {
+    @Test func prefixesAndBases() {
+        #expect(NoteNaming.prefix(day: "2026-10-07", number: 1) == "2026-10-07_01")
+        #expect(NoteNaming.prefix(day: "2026-10-07", number: 123) == "2026-10-07_123")
+        #expect(NoteNaming.base(prefix: "2026-10-07_01", name: "Weekly sync") == "2026-10-07_01_Weekly sync")
+        #expect(NoteNaming.base(prefix: "2026-10-07_01", name: "") == "2026-10-07_01")
+    }
+
+    @Test func parsingChecksTheFolderDate() {
+        #expect(NoteNaming.parse(base: "2026-10-07_03_Weekly sync", day: "2026-10-07")! == (3, "Weekly sync"))
+        #expect(NoteNaming.parse(base: "2026-10-07_03", day: "2026-10-07")! == (3, ""))
+        #expect(NoteNaming.parse(base: "2026-10-07_03_Sync", day: "2026-10-08") == nil)
+        #expect(NoteNaming.parse(base: "2026-10-07_3_Sync", day: "2026-10-07") == nil)
+        #expect(NoteNaming.parse(base: "2026-10-07_03x", day: "2026-10-07") == nil)
+        #expect(NoteNaming.parse(base: "13-31 Sync", day: "2026-10-07") == nil)
+    }
+
+    @Test func displayNamesForBothStyles() {
+        #expect(NoteNaming.displayName(base: "2026-10-07_01_Weekly sync") == "Weekly sync")
+        #expect(NoteNaming.displayName(base: "2026-10-07_01") == "Meeting")
+        #expect(NoteNaming.displayName(base: "13-31 Weekly sync") == "Weekly sync")
+        #expect(NoteNaming.displayName(base: "13-31 (2) Weekly sync") == "Weekly sync")
+        #expect(NoteNaming.displayName(base: "13-31") == "Meeting")
+        #expect(NoteNaming.displayName(base: "Weekly syn_01_x") == "Weekly syn_01_x")
+    }
+
+    @Test func nextNumberCountsBothStyles() {
+        let day = "2026-10-07"
+        #expect(NoteNaming.nextNumber(fileNames: [], day: day) == 1)
+        // Two meetings from before 0.9 (several files each): the next is 3.
+        #expect(NoteNaming.nextNumber(fileNames: ["09-00 A.md", "09-00 A-them.m4a", "11-30.md", ".DS_Store"], day: day) == 3)
+        // Gaps keep the highest: a deleted 02 doesn't get reused.
+        #expect(NoteNaming.nextNumber(fileNames: ["2026-10-07_01_A.md", "2026-10-07_03_B.md"], day: day) == 4)
+        #expect(NoteNaming.nextNumber(fileNames: ["2026-10-07_99_A.md", ".wingman-rename-x.md"], day: day) == 100)
+    }
+
+    @Test func reservingNeverReusesATakenName() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("wingman-naming-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let first = try NoteNaming.reserve(in: folder, day: "2026-10-07", name: "Sync")
+        let second = try NoteNaming.reserve(in: folder, day: "2026-10-07", name: "Sync")
+        #expect(first.prefix == "2026-10-07_01")
+        #expect(second.prefix == "2026-10-07_02")
+        #expect(FileManager.default.fileExists(atPath: first.base.path + ".md"))
+        // A companion file alone (a note moved away, its audio left) also holds its number.
+        try Data().write(to: folder.appendingPathComponent("2026-10-07_03_Sync-them.m4a"))
+        try FileManager.default.removeItem(at: second.base.appendingPathExtension("md"))
+        let third = try NoteNaming.reserve(in: folder, day: "2026-10-07", name: "Sync")
+        #expect(third.prefix == "2026-10-07_04")
+    }
+
+    @Test func numberedAudioWithoutAStartTimeAgesFromTheEndOfItsDay() throws {
+        let times = try #require(AudioCleanup.times(day: "2026-10-07", base: "2026-10-07_02_Sync", known: [:]))
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: times.ageFrom)
+        #expect(parts.hour == 23 && parts.minute == 59)
+        #expect(times.started < times.ageFrom)
+        let real = Date(timeIntervalSince1970: 1_790_000_000)
+        #expect(AudioCleanup.times(day: "2026-10-07", base: "2026-10-07_02_Sync", known: ["2026-10-07/2026-10-07_02_Sync": real])! == (real, real))
+        #expect(AudioCleanup.times(day: "2026-10-07", base: "Podcast", known: [:]) == nil)
+    }
+
+    @Test func ageLimitUsesAgeFrom() {
+        let now = Date()
+        let end = now.addingTimeInterval(-29.5 * 86_400)
+        let meetings = [AudioCleanup.Meeting(key: "a", started: now.addingTimeInterval(-31 * 86_400), files: [], bytes: 1, ageFrom: end)]
+        #expect(AudioCleanup.toRemove(meetings, now: now, maxAgeDays: 30, limitBytes: 0).isEmpty)
+    }
+}

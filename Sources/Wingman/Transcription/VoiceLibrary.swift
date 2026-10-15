@@ -1,10 +1,14 @@
 import Foundation
 import Observation
 
-/// People whose voices Wingman can recognize in later meetings, stored only on
-/// this Mac. A voiceprint is a speaker embedding — 256 numbers describing how a
-/// voice sounds, not what was said — averaged over every meeting where the
-/// user named or confirmed that person.
+/// People whose voices Wingman can recognize in later meetings, stored in
+/// Wingman's folder (never uploaded). A voiceprint is a speaker embedding — 256
+/// numbers describing how a voice sounds, not what was said — averaged over every
+/// meeting where the user named or confirmed that person.
+///
+/// Each voice learned is kept as a contribution (which meeting, which speaker in
+/// it), so one can be taken back exactly, a meeting's voices can be deleted, and
+/// the same voice is never learned twice. The file stays readable by 0.8.
 @MainActor
 @Observable
 final class VoiceLibrary {
@@ -18,10 +22,56 @@ final class VoiceLibrary {
         /// Sum of the (normalized) voices learned, so one can be taken out
         /// exactly; `voiceprint` is its direction. Missing in older files.
         var sum: [Float]? = nil
+        /// The voices learned. Missing in files from 0.8; `load` turns what 0.8
+        /// learned into one legacy contribution.
+        var contributions: [Contribution]? = nil
+        /// The speech model the voices come from; nil for voices learned before 0.9
+        /// (all from the same model so far).
+        var model: String? = nil
 
         /// The sum, or the best stand-in for people saved before it existed.
         var runningSum: [Float] { sum ?? voiceprint.map { $0 * Float(meetings) } }
     }
+
+    /// One voice learned into a person.
+    struct Contribution: Codable, Equatable, Identifiable {
+        let id: UUID
+        /// The meeting it came from (`MeetingIndex` id); nil for what 0.8 learned.
+        let meeting: UUID?
+        /// The speaker in that meeting (`MeetingIndex` speaker id).
+        let speaker: UUID?
+        /// Normalized, except a legacy contribution, which holds 0.8's whole sum.
+        let embedding: [Float]
+        /// How many meetings it stands for: 1, or 0.8's count for a legacy one.
+        let weight: Int
+        let learned: Date
+
+        var isLegacy: Bool { meeting == nil }
+    }
+
+    /// What happened when Wingman was asked to learn a voice.
+    enum LearnOutcome: Equatable {
+        case learned(person: UUID, contribution: UUID)
+        /// This meeting's speaker was learned before; nothing changed.
+        case alreadyLearned(person: UUID, contribution: UUID)
+        /// Someone with that name is known, but this voice doesn't sound like them.
+        case soundsDifferent(person: UUID, similarity: Float)
+        /// The voice comes from a different speech model than the person's.
+        case differentModel
+        case notSaved
+
+        var contribution: UUID? {
+            switch self {
+            case .learned(_, let id), .alreadyLearned(_, let id): id
+            default: nil
+            }
+        }
+    }
+
+    /// The speaker-embedding model the voices come from (FluidAudio's offline
+    /// diarizer, pinned by the package version). Change it when a FluidAudio
+    /// update changes the embedding: voices from different models aren't comparable.
+    nonisolated static let currentModel = "fluidaudio-offline-diarizer-1"
 
     struct Match {
         let name: String
@@ -47,65 +97,161 @@ final class VoiceLibrary {
         .appendingPathComponent("Wingman", isDirectory: true)
         .appendingPathComponent("voices.json")
     private let file: URL
+    /// Which meeting each voice came from, also kept beside `voices.json` (as `voices-history.json`):
+    /// 0.8 rewrites `voices.json` without it (it keeps the sums, so its own
+    /// learning shows up as a difference), so a downgrade and back doesn't
+    /// lose what Delete Voices and undo need.
+    private var historyFile: URL { Self.historyFile(for: file) }
+    nonisolated static func historyFile(for file: URL) -> URL {
+        file.deletingLastPathComponent().appendingPathComponent(file.deletingPathExtension().lastPathComponent + "-history.json")
+    }
+    struct History: Codable, Equatable {
+        var contributions: [Contribution]
+        var model: String?
+    }
 
     init(file: URL = VoiceLibrary.defaultFile) {
         self.file = file
-        if let data = try? Data(contentsOf: file),
-           let saved = try? JSONDecoder().decode([Person].self, from: data) {
-            people = saved
+        guard let data = try? Data(contentsOf: file),
+              let saved = try? JSONDecoder().decode([Person].self, from: data) else { return }
+        let history = (try? Data(contentsOf: historyFile)).flatMap { try? JSONDecoder().decode([String: History].self, from: $0) } ?? [:]
+        people = saved.map { Self.withContributions(Self.restoring($0, from: history[$0.id.uuidString])) }
+    }
+
+    /// A person as an older Wingman saved them (no contributions) gets back
+    /// the ones the history file kept for them.
+    nonisolated static func restoring(_ person: Person, from history: History?) -> Person {
+        guard person.contributions == nil, let history, !history.contributions.isEmpty else { return person }
+        var person = person
+        person.contributions = history.contributions
+        if person.model == nil { person.model = history.model }
+        return person
+    }
+
+    /// A person with contributions that add up to their sum: what 0.8 learned
+    /// (no contributions, or a sum 0.8 changed after 0.9 wrote them) becomes one
+    /// legacy contribution.
+    nonisolated static func withContributions(_ person: Person) -> Person {
+        var person = person
+        let old = person.contributions ?? []
+        let tracked = old.filter { !$0.isLegacy }
+        let trackedSum = sum(of: tracked, count: person.voiceprint.count)
+        let trackedCount = tracked.reduce(0) { $0 + $1.weight }
+        let total = person.runningSum
+        // Whatever the tracked voices don't account for is what 0.8 learned.
+        let rest = total.count == trackedSum.count ? zip(total, trackedSum).map(-) : total
+        var list = tracked
+        if person.meetings > trackedCount, rest.contains(where: { abs($0) > 1e-4 }) {
+            let id = old.first(where: \.isLegacy)?.id ?? UUID()
+            list.insert(Contribution(id: id, meeting: nil, speaker: nil, embedding: rest,
+                                     weight: person.meetings - trackedCount, learned: person.lastHeard), at: 0)
         }
+        guard !list.isEmpty else { return person }
+        person.contributions = list
+        recompute(&person)
+        return person
+    }
+
+    private nonisolated static func sum(of list: [Contribution], count: Int) -> [Float] {
+        var total = [Float](repeating: 0, count: list.first?.embedding.count ?? count)
+        for c in list where c.embedding.count == total.count {
+            for i in total.indices { total[i] += c.embedding[i] }
+        }
+        return total
     }
 
     // MARK: - Learning
 
-    /// One voice taught to one person, so it can be taken back on its own,
-    /// e.g. when the user corrects a name — even if the same person learned
-    /// other voices since.
-    struct LearnUndo {
-        let person: UUID
-        let voiceprint: [Float]
-    }
-
-    /// Remembers `voiceprint` as `name`, refining the stored one if this person
-    /// is known. Returns how to undo it.
+    /// Learns a meeting speaker's voice as `name`.
+    /// - A new name makes a new person.
+    /// - A known name adds to that person if the voice sounds like them
+    ///   (similarity ≥ `askAt`); otherwise nothing is learned and the caller can
+    ///   offer to learn it as a different person with the same name (`asNewPerson`).
+    /// - The same meeting speaker is never learned twice into the same person.
+    /// Saved before it's shown; `.notSaved` if the file couldn't be written.
     @discardableResult
-    func learn(_ name: String, voiceprint: [Float]) -> LearnUndo? {
+    func learn(_ name: String, voiceprint: [Float], meeting: UUID, speaker: UUID,
+               model: String = VoiceLibrary.currentModel, asNewPerson: Bool = false) -> LearnOutcome {
         let name = name.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, !voiceprint.isEmpty else { return nil }
+        guard !name.isEmpty, !voiceprint.isEmpty else { return .notSaved }
         let vector = Self.normalized(voiceprint)
-        let undo: LearnUndo
-        if let i = people.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-            undo = LearnUndo(person: people[i].id, voiceprint: vector)
-            let old = people[i].runningSum
-            let sum = old.count == vector.count ? zip(old, vector).map(+) : vector
-            people[i].sum = sum
-            people[i].voiceprint = Self.normalized(sum)
-            people[i].meetings += 1
-            people[i].lastHeard = Date()
-        } else {
-            let person = Person(id: UUID(), name: name, voiceprint: vector, meetings: 1, lastHeard: Date(), sum: vector)
-            people.append(person)
-            undo = LearnUndo(person: person.id, voiceprint: vector)
+        let contribution = Contribution(id: UUID(), meeting: meeting, speaker: speaker, embedding: vector, weight: 1, learned: Date())
+        var list = people
+
+        let sameName = list.indices.filter { list[$0].name.caseInsensitiveCompare(name) == .orderedSame }
+        for i in sameName {
+            if let done = list[i].contributions?.first(where: { $0.meeting == meeting && $0.speaker == speaker }) {
+                return .alreadyLearned(person: list[i].id, contribution: done.id)
+            }
         }
-        save()
-        return undo
+        if !asNewPerson, !sameName.isEmpty {
+            let comparable = sameName.filter { (list[$0].model ?? model) == model && list[$0].voiceprint.count == vector.count }
+            guard !comparable.isEmpty else { return .differentModel }
+            let best = comparable.max { Self.similarity(vector, list[$0].voiceprint) < Self.similarity(vector, list[$1].voiceprint) }!
+            let score = Self.similarity(vector, list[best].voiceprint)
+            guard score >= Self.askAt else { return .soundsDifferent(person: list[best].id, similarity: score) }
+            list[best].contributions = (list[best].contributions ?? []) + [contribution]
+            list[best].model = model
+            Self.recompute(&list[best])
+            list[best].lastHeard = Date()
+            return replace(with: list, failure: "Wingman couldn't save \(name)'s voice")
+                ? .learned(person: list[best].id, contribution: contribution.id) : .notSaved
+        }
+        let person = Person(id: UUID(), name: name, voiceprint: vector, meetings: 1, lastHeard: Date(), sum: vector,
+                            contributions: [contribution], model: model)
+        list.append(person)
+        return replace(with: list, failure: "Wingman couldn't save \(name)'s voice")
+            ? .learned(person: person.id, contribution: contribution.id) : .notSaved
     }
 
-    /// Takes one learned voice back out of the person's average; a person left
-    /// with no voices is forgotten.
-    func undo(_ undo: LearnUndo) {
-        guard let i = people.firstIndex(where: { $0.id == undo.person }) else { return }
+    /// Takes one learned voice back out of its person; a person left with no
+    /// voices is forgotten. Later learning is unaffected.
+    func undo(contribution id: UUID) {
+        guard let i = people.firstIndex(where: { $0.contributions?.contains { $0.id == id } == true }) else { return }
         var list = people
-        let sum = list[i].runningSum
-        if list[i].meetings <= 1 || sum.count != undo.voiceprint.count {
+        list[i].contributions?.removeAll { $0.id == id }
+        if list[i].contributions?.isEmpty ?? true {
             list.remove(at: i)
         } else {
-            let rest = zip(sum, undo.voiceprint).map(-)
-            list[i].sum = rest
-            list[i].voiceprint = Self.normalized(rest)
-            list[i].meetings -= 1
+            Self.recompute(&list[i])
         }
         replace(with: list, failure: "Wingman couldn't take back a voice it had learned")
+    }
+
+    func contribution(_ id: UUID) -> Contribution? {
+        people.lazy.compactMap { $0.contributions?.first { $0.id == id } }.first
+    }
+
+    /// Who deleting a meeting's voices would change: people recalculated without
+    /// it, and people learned only from it (forgotten).
+    func effectOfRemoving(meetings: Set<UUID>) -> (recalculated: [String], forgotten: [String]) {
+        var recalculated: [String] = [], forgotten: [String] = []
+        let from = { (c: Contribution) in c.meeting.map(meetings.contains) ?? false }
+        for person in people where person.contributions?.contains(where: from) == true {
+            if person.contributions!.allSatisfy(from) { forgotten.append(person.name) } else { recalculated.append(person.name) }
+        }
+        return (recalculated.sorted(), forgotten.sorted())
+    }
+
+    /// Removes every voice learned from `meetings`. False if it couldn't be saved.
+    @discardableResult
+    func removeVoices(fromMeetings meetings: Set<UUID>) -> Bool {
+        var list = people
+        for i in list.indices.reversed() where list[i].contributions?.contains(where: { $0.meeting.map(meetings.contains) ?? false }) == true {
+            list[i].contributions?.removeAll { $0.meeting.map(meetings.contains) ?? false }
+            if list[i].contributions?.isEmpty ?? true { list.remove(at: i) } else { Self.recompute(&list[i]) }
+        }
+        guard list != people else { return true }
+        return replace(with: list, failure: "Wingman couldn't delete the voices learned from that meeting")
+    }
+
+    /// Sum, voiceprint and meeting count from the contributions.
+    private nonisolated static func recompute(_ person: inout Person) {
+        let list = person.contributions ?? []
+        let total = sum(of: list, count: person.voiceprint.count)
+        person.sum = total
+        person.voiceprint = normalized(total)
+        person.meetings = list.reduce(0) { $0 + $1.weight }
     }
 
     func rename(_ person: Person, to name: String) {
@@ -124,7 +270,10 @@ final class VoiceLibrary {
 
     func forgetEveryone() {
         do {
-            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+            // The history holds voices too.
+            for url in [file, historyFile] where FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
             people = []
             problem = nil
         } catch {
@@ -134,14 +283,17 @@ final class VoiceLibrary {
     }
 
     /// Saves `list` and only then shows it.
-    private func replace(with list: [Person], failure: String) {
+    @discardableResult
+    private func replace(with list: [Person], failure: String) -> Bool {
         do {
             try persist(list)
             people = list
             problem = nil
+            return true
         } catch {
             Log.write("couldn't save voices: \(Log.describe(error))")
             problem = "\(failure) (\(error.localizedDescription)). Try again."
+            return false
         }
     }
 
@@ -195,7 +347,7 @@ final class VoiceLibrary {
         return na > 0 && nb > 0 ? dot / (na.squareRoot() * nb.squareRoot()) : 0
     }
 
-    private nonisolated static func normalized(_ v: [Float]) -> [Float] {
+    nonisolated static func normalized(_ v: [Float]) -> [Float] {
         let norm = v.reduce(0) { $0 + $1 * $1 }.squareRoot()
         return norm > 0 ? v.map { $0 / norm } : v
     }
@@ -211,18 +363,18 @@ final class VoiceLibrary {
         return !nameWords.isEmpty && nameWords.allSatisfy(words.contains)
     }
 
-    private func save() {
-        do {
-            try persist(people)
-            problem = nil
-        } catch {
-            Log.write("couldn't save voices: \(Log.describe(error))")
-            problem = "Wingman couldn't save its list of voices (\(error.localizedDescription))."
-        }
-    }
-
     private func persist(_ list: [Person]) throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(list).write(to: file, options: [.atomic, .completeFileProtection])
+        var history: [String: History] = [:]
+        for person in list { history[person.id.uuidString] = History(contributions: person.contributions ?? [], model: person.model) }
+        try JSONEncoder().encode(history).write(to: historyFile, options: [.atomic, .completeFileProtection])
+    }
+
+    /// Of these learned voices (contribution ids), the ones no longer
+    /// traceable: an older Wingman folded them into a person's voice.
+    func untraceable(_ contributions: Set<UUID>) -> Set<UUID> {
+        let known = Set(people.flatMap { $0.contributions ?? [] }.map(\.id))
+        return contributions.subtracting(known)
     }
 }

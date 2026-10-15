@@ -51,6 +51,28 @@ final class TrackWriter: @unchecked Sendable {
         }
     }
 
+    /// Queues the audio in one of Wingman's finished track files (after its
+    /// header), as if it had been appended: for joining a split back. Audio
+    /// appended after this call follows it. `done` says (on the writer's queue)
+    /// whether exactly `expected` samples were read and nothing failed to write,
+    /// so the caller knows whether `file` can go.
+    func appendContents(of file: URL, expected: Int, read: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
+                        done: @escaping @Sendable (Bool) -> Void) {
+        queue.async { [self] in
+            guard !closed, let data = try? read(file), data.count >= WAVFormat.headerSize else { return done(false) }
+            let body = data.dropFirst(WAVFormat.headerSize)
+            guard body.count / 4 == expected else { return done(false) }
+            let samples = body.withUnsafeBytes { Array($0.bindMemory(to: Float.self).prefix(body.count / 4)) }
+            unwritten += samples
+            if unwritten.count > Self.holdBack {
+                let ready = unwritten.count - Self.holdBack
+                write(Array(unwritten.prefix(ready)))
+                unwritten.removeFirst(ready)
+            }
+            done(!failed)
+        }
+    }
+
     /// Silences the latest `seconds` that haven't been written yet.
     func redact(seconds: Double) {
         queue.async { [self] in
@@ -114,6 +136,57 @@ final class TrackWriter: @unchecked Sendable {
                 onProblem("couldn't update the file: \(Log.describe(error))")
             }
         }
+    }
+}
+
+/// Which file a track's audio goes to right now. The capture side appends
+/// through it; a split points it at the new meeting's file between two
+/// buffers, so no audio is lost or doubled, and a join puts the old file back.
+final class WriterSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var writer: TrackWriter?
+    private var count = 0
+
+    /// Samples appended since the recording started (all meetings).
+    var appended: Int { lock.withLock { count } }
+
+    func append(_ samples: [Float]) {
+        lock.lock()
+        count += samples.count
+        writer?.append(samples)
+        lock.unlock()
+    }
+
+    func redact(seconds: Double) {
+        lock.withLock { writer?.redact(seconds: seconds) }
+    }
+
+    /// Points the slot at `new`; returns the writer it replaced (still open).
+    @discardableResult
+    func swap(_ new: TrackWriter?) -> TrackWriter? {
+        lock.withLock {
+            let old = writer
+            writer = new
+            return old
+        }
+    }
+
+    /// Undoes a split: what the current writer's file holds is appended to
+    /// `old`, ahead of any audio still to come, and `old` takes over again.
+    /// `done` gets whether that worked and the file it came from, which must
+    /// stay until it did (it's never read after `done`).
+    func rejoin(_ old: TrackWriter, read: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
+                done: @escaping @Sendable (Bool, URL?) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let current = writer {
+            let samples = current.finish()
+            let url = current.url
+            old.appendContents(of: url, expected: samples, read: read) { done($0, url) }
+        } else {
+            done(true, nil)
+        }
+        writer = old
     }
 }
 

@@ -8,6 +8,9 @@
 #                                    # doesn't allow (following Teams/Zoom mute)
 #   RELEASE=1 ./install.sh           # leave out the diagnostic command-line tools
 #                                    # (they run with Wingman's permissions)
+#   DEVELOPER_ID=1 ./install.sh      # sign with the Apple Developer ID certificate
+#                                    # (hardened runtime, secure timestamp) so it
+#                                    # can be notarized: scripts/notarize.sh
 set -euo pipefail
 
 APP="Wingman"
@@ -49,23 +52,60 @@ fi
 # ad hoc with a bundle-ID requirement. macOS ties Wingman's permissions to the
 # signature, so builds signed with the same certificate keep them; builds for
 # other people must use the Wingman certificate (scripts/make-release.sh checks).
+# SIGN_IDENTITY picks another certificate (a contributor's own, see CONTRIBUTING).
 IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
 IDENTITY=$(awk '$3 == "\"Wingman\"" { print $2; exit }' <<<"$IDENTITIES")
 NAME="Wingman"
+if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+  IDENTITY="$SIGN_IDENTITY"
+  NAME="$SIGN_IDENTITY"
+fi
 if [[ -z "$IDENTITY" ]]; then
   NAME=$(grep -oE '"(Developer ID Application|Apple Development)[^"]*"' <<<"$IDENTITIES" | head -1 | tr -d '"' || true)
   IDENTITY="$NAME"
+fi
+if [[ -n "${DEVELOPER_ID:-}" ]]; then
+  # The valid "Developer ID Application" certificate that lasts longest, by its
+  # fingerprint: a renewed certificate has the same name as the one it replaces.
+  IDENTITY=""
+  LATEST=0
+  while read -r hash; do
+    end=$(security find-certificate -a -Z -c "Developer ID Application" -p 2>/dev/null \
+      | awk -v h="$hash" '/^SHA-1 hash:/ { keep = ($3 == h) } keep' \
+      | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+    [[ -z "$end" ]] && continue
+    secs=$(date -j -f "%b %e %T %Y %Z" "$end" +%s 2>/dev/null || echo 0)
+    if (( secs > LATEST )); then LATEST=$secs; IDENTITY=$hash; fi
+  done < <(awk '/"Developer ID Application/ { print $2 }' <<<"$IDENTITIES")
+  if [[ -z "$IDENTITY" ]]; then
+    echo "error: no valid Developer ID Application certificate in the keychain" >&2
+    exit 1
+  fi
+  NAME="Developer ID (${IDENTITY:0:8}…, until $(date -j -f %s "$LATEST" +%Y-%m-%d))"
 fi
 echo "==> Signing (${NAME:-ad hoc})…"
 # Sparkle's helpers inside out, as its documentation asks (--deep alone can miss
 # the Autoupdate tool), with the same identity as the app.
 FW="$BUNDLE/Contents/Frameworks/Sparkle.framework"
-if [[ -d "$FW" ]]; then
+if [[ -n "${DEVELOPER_ID:-}" ]]; then
+  # Notarization needs the hardened runtime and Apple's timestamp on every piece
+  # of code; Sparkle's helpers keep their own entitlements.
+  SIGN=(codesign --force --options runtime --timestamp --sign "$IDENTITY")
+  if [[ -d "$FW" ]]; then
+    for item in "$FW"/Versions/B/XPCServices/*.xpc "$FW/Versions/B/Autoupdate" "$FW/Versions/B/Updater.app"; do
+      [[ -e "$item" ]] && "${SIGN[@]}" --preserve-metadata=entitlements "$item"
+    done
+    "${SIGN[@]}" "$FW"
+  fi
+  "${SIGN[@]}" --entitlements Wingman.entitlements "$BUNDLE"
+elif [[ -d "$FW" ]]; then
   for item in "$FW"/Versions/B/XPCServices/*.xpc "$FW/Versions/B/Autoupdate" "$FW/Versions/B/Updater.app" "$FW"; do
     [[ -e "$item" ]] && codesign --force --sign "${IDENTITY:--}" --timestamp=none "$item"
   done
 fi
-if [[ -n "${IDENTITY:-}" ]]; then
+if [[ -n "${DEVELOPER_ID:-}" ]]; then
+  :  # signed above
+elif [[ -n "${IDENTITY:-}" ]]; then
   codesign --force --deep --sign "$IDENTITY" --timestamp=none "$BUNDLE"
 else
   # Ad hoc signatures are identified by their exact contents, so macOS treats

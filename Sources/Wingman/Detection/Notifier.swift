@@ -20,10 +20,14 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     private static let warningID = "wingman.warning"
     /// userInfo key for the call session or recording a notification is about.
     nonisolated private static let subjectKey = "subject"
+    /// userInfo key for the note a "Meeting saved" notification is about.
+    nonisolated private static let noteKey = "note"
 
     private let center = UNUserNotificationCenter.current()
     /// The action, and the call session (ask) or recording (recording) it's for.
     var onAction: ((Action, UUID?) -> Void)?
+    /// A "Meeting saved" banner was clicked: the note it's about.
+    var onOpenNote: ((URL) -> Void)?
     /// Questions posted and not yet withdrawn.
     private var askIDs: Set<String> = []
 
@@ -96,12 +100,35 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         post(Self.recordingID, content)
     }
 
-    func announceSaved(_ name: String, warning: String? = nil) {
+    /// "Weekly sync — 3 speakers to name"; clicking it opens that meeting.
+    func announceSaved(_ name: String, toName: Int = 0, note: URL? = nil, warning: String? = nil) {
         withdrawRecording()
         let content = UNMutableNotificationContent()
         content.title = "Meeting saved"
-        content.body = warning.map { "\(name) — \($0)" } ?? name
+        var parts = [name]
+        if toName > 0 { parts.append(toName == 1 ? "1 speaker to name" : "\(toName) speakers to name") }
+        if let warning { parts.append(warning) }
+        content.body = parts.joined(separator: " — ")
+        if let note { content.userInfo = [Self.noteKey: note.path] }
         post("wingman.saved.\(UUID().uuidString)", content)
+    }
+
+    /// A new call started in the same app: it has its own note now.
+    func announceNewCall(_ name: String?) {
+        let content = UNMutableNotificationContent()
+        content.title = "New call — new note"
+        content.body = (name.map { "\"\($0)\". " } ?? "")
+            + "If it was the same call, click Join with Previous in its window within a minute."
+        post("wingman.newcall.\(UUID().uuidString)", content)
+    }
+
+    /// Delete Meeting… finished: the window it was done from has closed, so
+    /// say what happened where it's always seen.
+    func announceDeleted(_ message: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Meeting deleted"
+        content.body = message
+        post("wingman.deleted.\(UUID().uuidString)", content)
     }
 
     /// The note couldn't be written: the transcript is still in the window.
@@ -155,8 +182,11 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     ) async {
         let id = response.actionIdentifier
         let subject = (response.notification.request.content.userInfo[Self.subjectKey] as? String).flatMap(UUID.init)
+        let note = (response.notification.request.content.userInfo[Self.noteKey] as? String).map { URL(fileURLWithPath: $0) }
         await MainActor.run {
-            if let action = Action(rawValue: id), action != .open {
+            if let note, id == UNNotificationDefaultActionIdentifier, let onOpenNote {
+                onOpenNote(note)
+            } else if let action = Action(rawValue: id), action != .open {
                 onAction?(action, subject)
             } else if id == UNNotificationDefaultActionIdentifier {
                 // Clicking a banner only opens Wingman: recording needs the Record button.

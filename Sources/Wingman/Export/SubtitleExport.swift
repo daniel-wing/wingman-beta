@@ -44,9 +44,15 @@ enum SubtitleExport {
         return String(format: "%02d:%02d:%02d%@%03d", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, separator, ms % 1000)
     }
 
-    private static func escape(_ text: String) -> String {
+    static func escape(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    static func unescape(_ text: String) -> String {
+        text.replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
     }
 }

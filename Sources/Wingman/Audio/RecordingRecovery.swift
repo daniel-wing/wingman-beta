@@ -63,7 +63,7 @@ enum RecordingRecovery {
         let fm = FileManager.default
         let first = Recorder.dayFolderName(for: Calendar.current.date(byAdding: .day, value: -days, to: now)!)
         var byNote: [URL: [URL]] = [:]
-        for day in ((try? fm.contentsOfDirectory(atPath: notes.path)) ?? []) where isDay(day) && day >= first {
+        for day in ((try? fm.contentsOfDirectory(atPath: notes.path)) ?? []) where NoteNaming.isDay(day) && day >= first {
             let folder = notes.appendingPathComponent(day, isDirectory: true)
             for name in ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []) where name.hasSuffix("-me.wav") || name.hasSuffix("-them.wav") {
                 let track = folder.appendingPathComponent(name)
@@ -73,11 +73,6 @@ enum RecordingRecovery {
             }
         }
         return byNote.map { Record(note: $0.key, tracks: $0.value.sorted { $0.path < $1.path }, keepAudio: true, tracksKept: true, started: now) }
-    }
-
-    /// "2026-10-07".
-    static func isDay(_ text: String) -> Bool {
-        text.count == 10 && text.enumerated().allSatisfy { i, c in i == 4 || i == 7 ? c == "-" : c.isASCII && c.isNumber }
     }
 
     /// Whether a WAV's header sizes disagree with its length (left unfinished).

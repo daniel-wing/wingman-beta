@@ -75,10 +75,10 @@ extension Updates: SPUUpdaterDelegate {
     nonisolated func updater(_ updater: SPUUpdater, shouldPostponeRelaunchForUpdate item: SUAppcastItem,
                              untilInvokingBlock installHandler: @escaping () -> Void) -> Bool {
         MainActor.assumeIsolated {
-            guard recorder.phase != .idle else { return false }
+            guard recorder.busy else { return false }
             Log.write("update waits for the recording to finish")
             Task { @MainActor [recorder] in
-                while recorder.phase != .idle { try? await Task.sleep(for: .seconds(5)) }
+                while recorder.busy { try? await Task.sleep(for: .seconds(5)) }
                 installHandler()
             }
             return true

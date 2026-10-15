@@ -14,6 +14,7 @@ struct SettingsView: View {
     @Environment(\.openWindow) private var openWindow
     /// How much space meeting audio takes now, to help pick a size limit.
     @State private var audioBytes: Int64?
+    @State private var loginItem = LoginItem()
 
     var body: some View {
         Form {
@@ -37,6 +38,24 @@ struct SettingsView: View {
             } footer: {
                 footnote("Work from any app, so you don't need to find the menu-bar icon. Click a shortcut to change it.")
             }
+
+            Section {
+                Toggle("Open Wingman at login", isOn: Binding(get: { loginItem.isOn }, set: { loginItem.set($0) }))
+                if loginItem.waitingForApproval {
+                    HStack {
+                        Text("Waiting for your approval in System Settings → General → Login Items.").foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Open Login Items") { loginItem.openSystemSettings() }
+                    }
+                }
+                if let problem = loginItem.problem {
+                    Text(problem).foregroundStyle(.orange)
+                }
+            } footer: {
+                footnote("So calls are noticed without opening Wingman first. You can also change it in System Settings → General → Login Items.")
+            }
+            .onAppear { loginItem.refresh() }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in loginItem.refresh() }
 
             Section {
                 AutoRecordPickers(watcher: watcher)
@@ -217,18 +236,120 @@ private struct PeopleSection: View {
                 }
                 Button("Forget Everyone…", role: .destructive) { confirmForgetAll = true }
                     .confirmationDialog("Forget all \(voices.people.count) voices?", isPresented: $confirmForgetAll) {
-                        Button("Forget Everyone", role: .destructive) { voices.forgetEveryone() }
+                        Button("Forget Everyone", role: .destructive) { recorder.forgetEveryone() }
                     } message: {
-                        Text("Wingman won't recognize anyone until you name them again. Your notes aren't affected.")
+                        Text("Wingman won't recognize anyone until you name them again, and the voices it keeps from recent meetings are deleted too. Your notes aren't affected.")
                     }
             }
+            MeetingVoicesRow(recorder: recorder, index: recorder.index)
         } header: {
             Text("People")
         } footer: {
-            Text("When you name a voice after a meeting, Wingman keeps a voiceprint — numbers describing how the voice sounds, not recordings or words — and uses it to label that person in later meetings. Voiceprints stay on this Mac. Let people know if you keep them: in some places voice data counts as biometric information.")
+            Text("When you name a voice, Wingman keeps a voiceprint — numbers describing how the voice sounds, not recordings or words — and uses it to label that person in later meetings. So you can name speakers later, it also keeps the voices of each meeting's unnamed speakers for \(MeetingIndex.keepVoicesDays) days. Wingman never uploads voiceprints: they're in Wingman's folder in your Library, which backups of your Mac (such as Time Machine) may include. Let people know if you keep them: in some places voice data counts as biometric information.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+/// "Meeting voices: kept for 12 meetings" with the list, to delete them early.
+private struct MeetingVoicesRow: View {
+    let recorder: Recorder
+    let index: MeetingIndex
+    @State private var showing = false
+
+    var body: some View {
+        let count = index.meetingsWithVoices.count
+        HStack {
+            Text(count == 0
+                 ? "Meeting voices: none kept."
+                 : "Meeting voices: kept for \(count == 1 ? "1 meeting" : "\(count) meetings"), each deleted \(MeetingIndex.keepVoicesDays) days after the meeting.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            if count > 0 { Button("Show…") { showing = true } }
+        }
+        if let problem = index.problem {
+            Label(problem, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        EmptyView()
+            .sheet(isPresented: $showing) { MeetingVoicesList(recorder: recorder, index: index) }
+    }
+}
+
+private struct MeetingVoicesList: View {
+    let recorder: Recorder
+    let index: MeetingIndex
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirming: Set<UUID>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Meeting Voices").font(.headline)
+            Text("The voices of speakers nobody has named yet, kept so you can name them later. Each meeting's are deleted \(MeetingIndex.keepVoicesDays) days after it.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            List(index.meetingsWithVoices) { meeting in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(MeetingVoicesList.title(meeting))
+                        Text("Kept until \(MeetingIndex.voicesExpire(meeting).formatted(date: .abbreviated, time: .omitted))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Delete…", role: .destructive) { confirming = [meeting.id] }
+                }
+            }
+            .frame(minHeight: 200)
+            HStack {
+                Button("Delete All…", role: .destructive) { confirming = Set(index.meetings.map(\.id)) }
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .confirmationDialog(confirmTitle, isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })) {
+            Button("Delete", role: .destructive) {
+                guard let ids = confirming else { return }
+                if ids.count == 1 { recorder.deleteVoices(of: ids) } else { recorder.deleteAllMeetingVoices() }
+                confirming = nil
+            }
+        } message: {
+            Text(confirmMessage)
+        }
+    }
+
+    private var confirmTitle: String {
+        (confirming?.count ?? 0) == 1 ? "Delete this meeting's voices?" : "Delete every meeting's voices?"
+    }
+
+    /// Says exactly what else goes: what Wingman learned from these meetings.
+    private var confirmMessage: String {
+        guard let ids = confirming else { return "" }
+        let effect = recorder.effectOfDeletingVoices(of: ids)
+        var parts = ["Names in your notes stay, but Wingman won't learn voices from \(ids.count == 1 ? "this meeting" : "these meetings") anymore."]
+        if !effect.recalculated.isEmpty {
+            parts.append("What it learned from \(ids.count == 1 ? "it" : "them") is removed: \(effect.recalculated.joined(separator: ", ")) will be recognized from other meetings only.")
+        }
+        if !effect.forgotten.isEmpty {
+            parts.append("\(effect.forgotten.joined(separator: ", ")) \(effect.forgotten.count == 1 ? "was" : "were") learned only from \(ids.count == 1 ? "it" : "them") and will be forgotten.")
+        }
+        let untraceable = recorder.untraceableLearning(in: Set(ids))
+        if !untraceable.isEmpty {
+            parts.append("An older version of Wingman changed \(untraceable.joined(separator: ", "))'s voice, so what this meeting taught can't be taken out exactly. To remove it completely, forget them in Settings → People.")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// "Weekly sync, 7 Oct" from the meeting's key.
+    static func title(_ meeting: MeetingIndex.Meeting) -> String {
+        let parts = meeting.key.split(separator: "/", maxSplits: 1).map(String.init)
+        let name = parts.count == 2 ? NoteNaming.displayName(base: parts[1]) : meeting.key
+        let date = (meeting.started ?? MeetingIndex.endOfDay(meeting.key)).map { $0.formatted(date: .abbreviated, time: .shortened) } ?? ""
+        return [name, date].filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }
 

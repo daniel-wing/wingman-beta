@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # Builds the beta that testers download: without the diagnostic tools
-# (RELEASE=1), signed with the "Wingman" certificate (macOS ties testers'
-# permissions to it, so they're kept across updates and no other program can
-# inherit them), zipped with ditto so the signature survives, without extended
+# (RELEASE=1), signed with the maintainer's Apple Developer ID (hardened
+# runtime, Apple timestamp) and notarized by Apple, so it opens without
+# warnings; macOS ties testers' permissions to that signature. Zipped with
+# ditto after the notarization ticket is stapled, without extended
 # attributes. Upload the zip to a GitHub release of the public beta repo.
+#
+# Needs, on the build Mac: the Developer ID Application certificate in the
+# login keychain, the notary login saved as "wingman-notary" (see
+# scripts/notarize.sh), and the expected Team ID in
+# ~/.config/wingman/team-id (kept out of the repo; a build signed by any
+# other team is refused).
 #
 #   scripts/make-release.sh        → .build/dist/Wingman-<version>.zip (+ .sha256)
 #                                    and .build/dist/appcast.xml (the update feed)
@@ -63,24 +70,57 @@ if ! (cd "$SRC" && swift test --disable-keychain --only-use-versions-from-resolv
   exit 1
 fi
 grep -E "Test run with" "$STAGE/tests.log" | tail -1
-(cd "$SRC" && RELEASE=1 DEST="$STAGE" ./install.sh)
-APP="$STAGE/Wingman.app"
-codesign --verify --deep --strict "$APP"
-# Never ship an ad-hoc build: anything signed ad hoc with Wingman's bundle ID
-# would match it and inherit testers' permissions.
-SIGNATURE=$(codesign -dvv "$APP" 2>&1; codesign -dr - "$APP" 2>&1)
-if ! grep -qx "Authority=Wingman" <<<"$SIGNATURE" || ! grep -q 'certificate leaf = H"' <<<"$SIGNATURE"; then
-  echo "error: not signed with the Wingman certificate (see PROGRESS.md); refusing to ship it" >&2
+TEAM_FILE="$HOME/.config/wingman/team-id"
+EXPECTED_TEAM=$(tr -d '[:space:]' < "$TEAM_FILE" 2>/dev/null || true)
+if [[ -z "$EXPECTED_TEAM" ]]; then
+  echo "error: put the Developer ID Team ID in $TEAM_FILE" >&2
   exit 1
 fi
+(cd "$SRC" && DEVELOPER_ID=1 RELEASE=1 DEST="$STAGE" ./install.sh)
+APP="$STAGE/Wingman.app"
+codesign --verify --deep --strict "$APP"
+# Never ship anything but the expected Developer ID: an ad hoc build would let
+# any program signed ad hoc with Wingman's bundle ID inherit testers'
+# permissions, and another team's signature isn't ours.
+SIGNATURE=$(codesign -dvv "$APP" 2>&1)
+if ! grep -q "^Authority=Developer ID Application:" <<<"$SIGNATURE" || ! grep -qx "TeamIdentifier=$EXPECTED_TEAM" <<<"$SIGNATURE" \
+   || ! grep -q "flags=.*runtime" <<<"$SIGNATURE"; then
+  echo "error: not signed with the expected Developer ID and hardened runtime; refusing to ship it" >&2
+  exit 1
+fi
+# A renewed certificate is needed for releases after this one expires
+# (released versions keep working: they carry Apple's timestamp).
+END=$(codesign -d --extract-certificates="$STAGE/cert" "$APP" >/dev/null 2>&1 && openssl x509 -inform DER -in "$STAGE/cert0" -noout -enddate | cut -d= -f2)
+if [[ -n "$END" ]]; then
+  DAYS=$(( ($(date -j -f "%b %e %T %Y %Z" "$END" +%s) - $(date +%s)) / 86400 ))
+  (( DAYS < 60 )) && echo "warning: the Developer ID certificate expires in $DAYS days ($END): renew it before the next release" >&2
+fi
+rm -f "$STAGE"/cert*
 if "$APP/Contents/MacOS/Wingman" whosmic >/dev/null 2>&1; then
   echo "error: the diagnostic tools are still in the build" >&2
   exit 1
 fi
 
+# Apple's notary service, then the ticket stapled to the app (no network
+# check needed when testers open it).
+scripts/notarize.sh "$APP"
+
 ZIP="$OUT/Wingman-$VERSION.zip"
 rm -f "$ZIP"
 ditto -c -k --norsrc --noextattr --keepParent "$APP" "$ZIP"
+# The exact zip testers get, opened the way a browser download is (quarantined):
+# Gatekeeper must accept it as notarized.
+CHECK=$(mktemp -d -t wingman-gatekeeper)
+ditto -x -k "$ZIP" "$CHECK"
+xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$CHECK/Wingman.app"
+ASSESSMENT=$(spctl --assess --type execute -vv "$CHECK/Wingman.app" 2>&1 || true)
+echo "$ASSESSMENT" | sed 's/^/    /'
+if ! grep -q "source=Notarized Developer ID" <<<"$ASSESSMENT"; then
+  rm -rf "$CHECK"
+  echo "error: Gatekeeper doesn't accept the zip as notarized" >&2
+  exit 1
+fi
+rm -rf "$CHECK"
 (cd "$OUT" && shasum -a 256 "$(basename "$ZIP")" | tee "$(basename "$ZIP").sha256")
 echo "==> $ZIP"
 

@@ -2,7 +2,7 @@
 # Copies the public part of the last commit into a checkout of the public repo
 # (daniel-wing/wingman-beta; default .build/public-repo), ready to check with
 # scripts/check-public.sh --repo and commit there. The maintainer's notes
-# (LEDGER.md, PROGRESS.md, CLAUDE.md) and this repo's README stay private;
+# (LEDGER.md, PROGRESS.md, CLAUDE.md, docs/wing-log/) and this repo's README stay private;
 # beta-site/ becomes the public README, release notes and issue forms.
 #
 #   scripts/export-public.sh [public-repo-checkout]
@@ -23,6 +23,8 @@ TMP="$(mktemp -d -t wingman-export)"
 trap 'rm -rf "$TMP"' EXIT
 git archive HEAD | tar -x -C "$TMP"
 rm -f "$TMP/LEDGER.md" "$TMP/PROGRESS.md" "$TMP/CLAUDE.md" "$TMP/README.md"
+rm -rf "$TMP/docs/wing-log"
+rmdir "$TMP/docs" 2>/dev/null || true
 cp -R "$TMP/beta-site/." "$TMP/"
 rm -rf "$TMP/beta-site"
 rsync -a --delete --exclude .git "$TMP/" "$DEST/"

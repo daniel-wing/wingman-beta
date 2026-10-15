@@ -1,0 +1,31 @@
+# Builds and tests every push and pull request: the regular app, and the App
+# Store variant (which must have no Accessibility features and no Sparkle).
+# Nothing is signed or published here.
+name: Build and test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Build
+        run: swift build --disable-keychain
+      - name: Test
+        run: swift test --disable-keychain
+      - name: App Store variant
+        run: |
+          swift build -c release --disable-keychain -Xswiftc -DAPP_STORE -Xswiftc -DNO_DIAGNOSTICS -Xlinker -dead_strip_dylibs
+          BIN=.build/release/Wingman
+          if nm -u "$BIN" | grep -q AXUIElement; then echo "App Store build uses Accessibility"; exit 1; fi
+          if otool -L "$BIN" | grep -q Sparkle; then echo "App Store build links Sparkle"; exit 1; fi
+          echo "App Store variant: no Accessibility, no Sparkle"

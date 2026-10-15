@@ -18,9 +18,9 @@ Mac: no account, no cloud, and no bot joining your meeting. It's free and
 
 **En español:** Wingman graba y transcribe tus llamadas de Teams, Zoom, Google Meet o del navegador
 en tu Mac, sin nube. Entiende español e inglés mezclados. Puedes enviar tus
-comentarios en español. Si tu Mac está en español, los botones de la instalación se
-llaman *Configuración del Sistema* (o *Ajustes del Sistema*) → *Privacidad y
-seguridad* → *Abrir igualmente*; no elijas *trasladar a la papelera*. Tu calendario del
+comentarios en español. Wingman está firmado y notarizado por Apple: se abre como
+cualquier app descargada (en macOS, *Abrir*). Si vienes de la versión 0.8, macOS vuelve
+a pedir los permisos una vez y Wingman te guía. Tu calendario del
 trabajo (Outlook / Microsoft 365) funciona sin iniciar sesión en Microsoft desde Wingman:
 agrega la cuenta en *Cuentas de internet* de la Mac (opción *Microsoft Exchange*) y
 Wingman la lee desde la app Calendario ([pasos](#connect-your-work-calendar)).
@@ -32,15 +32,24 @@ Wingman la lee desde la app Calendario ([pasos](#connect-your-work-calendar)).
 - **Starts with your calls.** When Microsoft Teams, Zoom, Google Meet or another call in
   your browser starts using the microphone, Wingman asks whether to record it — or
   records automatically, or ignores it; you choose per app. Recording stops when the
-  call ends. ([How Google Meet is recognized](#google-meet).)
+  call ends. ([How Google Meet is recognized](#google-meet).) Optionally it opens when
+  you log in (Settings).
+- **One note per call.** Each call gets its own note and window, even when Teams or Zoom
+  goes straight into the next call (**Join with Previous** undoes a wrong split). A test
+  call you don't need? **Delete Meeting…** moves its note and audio to the Trash.
 - **Live transcript.** Read along as people talk. English and Spanish can be mixed in
   the same meeting, even in the same sentence ("vamos a revisar el *dashboard* de
   Power BI"). Portuguese has had some testing; French, German and Italian are
   available but untested.
 - **Knows who said what.** Your microphone is **Me**; after the call, the other side
-  is split into **Them 1, Them 2…**. Click a name to rename it. If you turn on
-  *Recognize people* (experimental), Wingman learns voices you've named and recognizes
-  those people in later meetings.
+  is split into **Them 1, Them 2…**. Click a name to rename it, or **Name Them** to go
+  through everyone still unnamed. Jumped straight into the next call? Name them later in
+  the **Meetings** window, even while the next call records. If you turn on *Recognize
+  people* (experimental), Wingman learns voices you've named and recognizes those people
+  in later meetings.
+- **Easy to read back.** **Find** (⌘F) a phrase to see who said it — capitals, accents and
+  punctuation don't matter, and if the exact phrase isn't there it finds the lines with
+  all its words. Make the text bigger or smaller with ⌘+ / ⌘−.
 - **Uses your calendar — no Microsoft sign-in.** Wingman reads the Mac's own Calendar
   app, so your Outlook / Microsoft 365 work calendar works even if your company doesn't
   let apps like this connect to your Microsoft account: add the account to your Mac once
@@ -95,19 +104,22 @@ minute to tidy up:
   suggested or named automatically.
 - **Echo clean-up.** On laptop speakers your microphone also hears the call. A line of
   yours that clearly repeats theirs, word for word and right after it, is removed; one
-  that's only similar (*"We should **not** deploy today"*) is kept and marked *(possible
-  echo)*, so a real reply is never lost. With headphones nothing is filtered.
+  that's only similar is kept and marked *(possible echo)*, so a real reply is never
+  lost. A line that adds a "not" to theirs (*"We should **not** deploy today"*) is a reply
+  and isn't even marked. With headphones nothing is filtered.
 - **The audio:** one file with both sides mixed, to play back any moment, plus your voice
   and the call as separate tracks.
 
 **4. A note you own.** Everything ends up in `~/Meeting Notes/<date>/` as a text file
 (title, date, calendar details, the transcript with speakers and timestamps) plus the
-audio. Lines the model wasn't confident about are marked *(unclear)*.
+audio, named by the day and the meeting's number that day: `2026-10-07_01_Weekly sync.md`.
+(Notes from before 0.9 keep their names, like `13-31 Weekly sync.md`.) Lines the model
+wasn't confident about are marked *(unclear)*.
 
 ### Privacy
 
-- **Everything runs on your Mac.** Audio, transcripts and voiceprints never leave it.
-  There is no account, no analytics and no telemetry.
+- **Everything runs on your Mac.** Wingman never sends audio, transcripts or voiceprints
+  anywhere. There is no account, no analytics and no telemetry.
 - **Wingman goes online only to download its speech models**, once, right after setup,
   from Hugging Face (`huggingface.co` must be reachable — some work networks block it):
   about 0.6 GB for live transcription, 1.5 GB for the language review and a few MB for
@@ -127,7 +139,17 @@ audio. Lines the model wasn't confident about are marked *(unclear)*.
   while it lasts. With *Save meeting audio* off, that audio sits in a private folder
   (`~/Library/Caches/Wingman`) and is deleted once the note is saved, or at the next
   launch if Wingman was stopped mid-meeting.
-- **Voiceprints are kept only if you turn on *Recognize people***, and only on your Mac.
+- **Voiceprints are kept only if you turn on *Recognize people***. A voiceprint is a list
+  of numbers describing how a voice sounds, not a recording. For people you name,
+  Wingman keeps one until you forget them (Settings → People). So you can name speakers
+  later, it also keeps the voiceprints of each meeting's **unnamed** speakers for **180
+  days** after the meeting, then deletes them. You can delete them sooner, per meeting
+  (Meetings → *Delete Voices…*) or all at once (Settings → People); turning *Recognize
+  people* off deletes them all. They're stored in `~/Library/Application Support/Wingman`,
+  which backups of your Mac (such as Time Machine) may include.
+- **Naming a speaker later changes the note**, only the speaker's name on their lines
+  (and in the subtitles). Before each change Wingman keeps a copy of the note for 30 days
+  in `~/Library/Application Support/Wingman/Note Backups`, readable only by you.
 
 ### Please record responsibly
 
@@ -159,25 +181,20 @@ people*, some places also require consent to keep someone's voiceprint.
 2. Open your **Downloads** folder. If you already see the Wingman app, your browser
    unzipped it for you; otherwise double-click the zip. Drag **Wingman** into
    **Applications**.
-3. Double-click Wingman in Applications. macOS says *"Wingman" Not Opened*. That's
-   expected for this beta: click **Done** (not *Move to Trash*).
-4. Open **System Settings → Privacy & Security**, scroll down to **Security**, and click
-   **Open Anyway** next to *"Wingman" was blocked*. Confirm with your password or Touch
-   ID, and click **Open Anyway** once more if macOS asks again. The button is only there
-   for a while after step 3, so do this right away.
-5. A short welcome guide explains each permission before macOS asks for it. When you
+3. Double-click Wingman in Applications. macOS asks whether to open an app downloaded
+   from the internet: click **Open**.
+4. A short welcome guide explains each permission before macOS asks for it. When you
    finish it, the guide closes and Wingman moves to the menu bar (see
    [Where is Wingman?](#where-is-wingman)). It then downloads its speech models (about
    2 GB, once): click its menu-bar icon to see *Downloading…*. When that line is gone,
    Wingman is ready — give it a few minutes before your first call.
 
-> **Why does macOS warn?** Apple *notarizes* apps from paid developer accounts. This
-> beta isn't notarized yet, so macOS asks you to confirm — only do that for apps from
-> people you trust. Prefer the Terminal? This replaces steps 3–4:
-> `xattr -dr com.apple.quarantine /Applications/Wingman.app`
+> From 0.9.0 on, Wingman is signed with an Apple Developer ID and **notarized** by
+> Apple (checked for malicious software), so macOS opens it like any other app from the
+> internet. Versions before 0.9.0 needed *Open Anyway*.
 >
-> **Work Mac?** If your company manages your Mac, *Open Anyway* or the audio
-> permissions may be blocked or need your IT team.
+> **Work Mac?** If your company manages your Mac, the audio permissions may be blocked
+> or need your IT team.
 
 ### Updates
 
@@ -188,6 +205,15 @@ and installs it the next time Wingman quits or your Mac restarts — or right aw
 are checked against the project's signature, so only versions published here install,
 and they don't need *Open Anyway*. To check yourself: menu bar icon → **Check for
 Updates…**; to switch it off: Settings → About.
+
+**Updating from 0.8 to 0.9.0:** 0.9.0 is the first version signed with an Apple Developer
+ID, so macOS treats it as a new app and asks once more for the permissions you gave the
+old one. Wingman opens **Allow Wingman Again** to walk you through it. For
+**Accessibility**, System Settings may still show the old Wingman switched on: select it,
+click **−**, then click **Allow** in Wingman. Your notes, settings and the voices you named
+are unchanged. To go back to 0.8.2, download it from the
+[releases page](https://github.com/daniel-wing/wingman-beta/releases); macOS then asks for
+the permissions again, and 0.8.2 will offer 0.9.0 as an update.
 
 Still on 0.7.0? Install the latest version by hand once (the steps above); updates are
 automatic after that.
@@ -260,9 +286,24 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
 - **Mute Wingman:** **⌃⌥M** from any app. Your voice is left out of the transcript *and*
   the audio until you press it again or quit Wingman (the menu-bar icon shows a crossed-out mic). Or
   let it follow your Teams/Zoom mute (Settings → Calls).
-- **After a meeting:** click a speaker's name to rename them, pick the calendar event
-  next to the meeting name, or **Export** subtitles. Your notes and audio are one click
-  away: menu bar icon → **Open Notes Folder**.
+- **One window per call.** Each call opens in its own window and keeps it after it
+  ends, so naming speakers in one call isn't interrupted by the next. If Teams or Zoom
+  moves straight on to another call, Wingman starts a new note at that moment (with no
+  gap in the audio) and tells you; **Join with Previous** undoes it for a minute if it
+  was the same call. A meeting finishes in the background while the next one records.
+- **Delete a call you don't need** (a test, a call you won't keep): **Delete Meeting…**
+  in its window, or in Meetings, moves its note, audio and subtitles to the Trash, and
+  Wingman forgets the voices it learned from it.
+- **After a meeting:** click a speaker's name to rename them (or **Name Them** to go
+  through everyone left), pick the calendar event next to the meeting name, or **Export**
+  subtitles. The "Meeting saved" notification says how many speakers are left to name;
+  click it to name them. Your notes and audio are one click away: menu bar icon → **Open
+  Notes Folder**.
+- **Name speakers later:** menu bar icon → **Meetings…** lists the last two weeks, with how
+  many speakers each has left to name (**Open…** for older notes). It works while
+  another call records. For meetings recorded before 0.9, Wingman looks for the voices in
+  the meeting's call audio (if you kept it) and, for people you name, offers to learn
+  their voice: play the sample, then **Learn**.
 - **Languages:** in Settings → Languages, check only the languages spoken in your
   meetings (English, Spanish and Portuguese start checked) and pick your main one.
   Speech in a language you haven't checked is rewritten into one you have.
@@ -310,11 +351,18 @@ Wingman recognizes a Meet call from what Chrome itself shows, never from the pag
 - Following your mute works with the Teams and Zoom apps, not yet with Google Meet or
   other calls in a browser (mute Wingman with ⌃⌥M), and has been tested with their English versions. If you use them in another language,
   check that Wingman's *You're muted* line matches, and tell me if it doesn't.
-- While Wingman is finishing a meeting, it can't start recording the next one; it offers
-  the new call when done.
+- Back-to-back calls are told apart by Teams or Zoom opening a new call window (with
+  Accessibility on). In a browser, a new Google Meet link is a new call; two calls in
+  the same browser tab with no pause between them stay in one note: stop and start
+  again between them.
 - Taking AirPods in and out during a call can split the meeting into two notes.
-- Installing Wingman the first time needs **Open Anyway** once, until it's notarized;
-  updates install without it.
+- For meetings recorded before 0.9, finding voices in the old audio is cautious: it often
+  finds none clear enough to offer, and then only the names change.
+- If call detection can't tell whether a call is still going (rare), Wingman keeps
+  recording and says so, until the call is clearly over or you stop it.
+- Names, remembered voices and note backups live on each Mac. With a synced notes
+  folder on two Macs, naming a speaker on one doesn't teach the other Mac that voice,
+  and deleting voices on one doesn't delete them on the other.
 
 ## Feedback
 
@@ -348,7 +396,9 @@ everything else too, open each folder in Finder (**Shift-⌘-G**, paste the path
 Return) and move it to the Trash:
 
 - `~/Meeting Notes` — **your notes and recordings** (keep them if you want them!)
-- `~/Library/Application Support/Wingman` — remembered voices and the review model
+- `~/Library/Application Support/Wingman` — remembered voices, recent meetings' voices
+  and speaker names (`voices.json`, `voices-history.json`, `meetings.json`,
+  `meeting-voices.json`), note backups and the review model
 - `~/Library/Application Support/FluidAudio/Models` — the speech models (if no other app
   uses FluidAudio, remove the whole `FluidAudio` folder)
 - `~/Library/Caches/local.wingman.app` — prepared copies of the models and downloaded updates

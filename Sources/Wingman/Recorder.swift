@@ -58,7 +58,31 @@ final class Recorder {
     /// model (one time, ~0.6 GB)…"; nil when there's none.
     private(set) var modelStatus: String?
     private var preparingModels = false
-    private(set) var lines: [TranscriptLine] = []
+    #if !NO_DIAGNOSTICS
+    var stressLines: [TranscriptLine] {
+        get { focus?.lines ?? [] }
+        set { focus?.replaceLines(newValue) }
+    }
+    var stressLineCount: Int { focus?.lines.count ?? 0 }
+    private static let stressLiveID = UUID()
+    /// A throwaway meeting in the scratch folder, shown as if recording.
+    func stressMeeting() -> Meeting {
+        let base = Self.scratchFile("stress-\(UUID().uuidString)")
+        let meeting = Meeting(recorder: self, stage: .recording, origin: 0, started: Date(), name: "Stress test", event: nil,
+                              nameFromCalendar: false, base: base, prefix: "stress", tracksKept: false, meAudio: nil, themAudio: nil,
+                              sourceFile: "stress")
+        meetings.append(meeting)
+        current = meeting
+        return meeting
+    }
+    func stressLiveLine(_ text: String, at start: TimeInterval) {
+        guard let meeting = focus else { return }
+        var lines = meeting.lines
+        let line = TranscriptLine(id: Self.stressLiveID, speaker: .them, start: start, end: start + 3, text: text, isFinal: false)
+        if let i = lines.firstIndex(where: { $0.id == Self.stressLiveID }) { lines[i] = line } else { lines.append(line) }
+        meeting.replaceLines(lines)
+    }
+    #endif
     private(set) var warning: String?
     /// Ignore the microphone, e.g. while playing back a recorded call through
     /// the speakers. Lasts until unmuted, across recordings.
@@ -99,7 +123,7 @@ final class Recorder {
             // Detection lags slightly behind the click: erase what was said just before.
             // The erase travels with the audio, so it lands exactly where the mute was noticed.
             if !wasMuted, !callMuteIgnored {
-                writers[.me]?.redact(seconds: 0.5)
+                slots[.me]?.redact(seconds: 0.5)
                 feeds[.me]?.yield(.redact(seconds: 0.5))
             }
         } else {
@@ -149,63 +173,22 @@ final class Recorder {
     private let micLevel = LockedLevel()
     private var muteObserver: NSObjectProtocol?
     /// Short status note, e.g. "Switched to AirPods Pro at 00:12:03".
-    private(set) var notice: String?
+    var notice: String?
     private(set) var lastError: String?
-    /// The note on disk has everything up to the last write (false before the
-    /// first write and after a failed one, so nothing claims "saved" untrue).
-    private(set) var noteSaved = false
-    /// Why the note couldn't be saved: shown in the window with Save Note As….
-    private(set) var noteSaveError: String?
-    /// Identifies this recording, so an action from an older notification
-    /// (Stop, Discard) can't apply to a newer one.
-    private(set) var recordingID = UUID()
-    /// Stream problems already shown in this recording (one warning each).
-    private var reportedProblems: Set<String> = []
-    /// The call played through speakers at some point in this recording, so the
-    /// microphone may have heard it (no echo filtering when it's headphones only).
-    private var speakersUsed = true
-    private(set) var currentNote: URL?
-    private(set) var startedAt: Date?
-    private var endedAt: Date?
 
-    /// What the user calls this meeting; it becomes part of every file name.
-    var meetingName = ""
-    /// The name the current note's files carry, to tell an edit from a leftover.
-    private var appliedName = ""
-    /// "17-07" (or "17-07 (2)"), the part of the file name that never changes.
-    private var timePrefix = ""
-    /// Real names for speaker labels, e.g. "Them 1" → "Ana". Set after a meeting.
-    private(set) var speakerNames: [String: String] = [:]
-    /// Voiceprints of this meeting's other voices, by label ("Them 1", or "Them" if one).
-    private var voiceprints: [String: [Float]] = [:]
-    /// Tentative recognitions waiting for confirmation, by label: "Them 2" → "Ana".
-    private(set) var voiceGuesses: [String: String] = [:]
-    /// Labels named automatically because their voice matched someone known.
-    private(set) var recognized: Set<String> = []
     /// People whose voices can be recognized in later meetings.
     let voices = VoiceLibrary()
+    /// What Wingman keeps about each meeting's speakers: names, and for 180 days
+    /// the voices of those not named yet, so they can be named later.
+    let index = MeetingIndex()
     /// Remember the voices of people the user names, and recognize them later.
     var recognizeVoices: Bool {
-        didSet { UserDefaults.standard.set(recognizeVoices, forKey: "recognizeVoices") }
+        didSet {
+            UserDefaults.standard.set(recognizeVoices, forKey: "recognizeVoices")
+            // Off means no voices kept for later, and none looked for in older meetings.
+            if oldValue, !recognizeVoices { index.deleteAllVoices(because: .notAllowed) }
+        }
     }
-    /// The file this transcript came from, for meetings transcribed from a recording.
-    private(set) var sourceFile: String?
-    /// The calendar event this recording belongs to, when there is one.
-    private(set) var meeting: MeetingInfo?
-    /// A choice made in the calendar menu before recording started: an event,
-    /// or explicitly none. Used instead of looking one up.
-    private var preselection: Preselection = .unset
-    private enum Preselection { case unset, event(MeetingInfo), noEvent }
-    /// The meeting name came from the calendar (so picking another event may replace it).
-    private var nameFromCalendar = false
-    /// The call app this recording was started for; it stops when that call ends.
-    private(set) var callApp: CallApp?
-    /// The call session this recording was started for (`CallTracker`): only that
-    /// call ending stops it.
-    private(set) var callSessionID: UUID?
-    /// That call's Google Meet code, which puts the calendar event with the same
-    /// Meet link first in the calendar menu.
-    private(set) var callMeetingCode: String?
     /// Look up the current calendar event for names and attendees.
     var useCalendar: Bool {
         didSet { UserDefaults.standard.set(useCalendar, forKey: "useCalendar") }
@@ -219,8 +202,6 @@ final class Recorder {
     var keepSeparateTracks: Bool {
         didSet { UserDefaults.standard.set(keepSeparateTracks, forKey: "keepSeparateTracks") }
     }
-    /// Whether this meeting's WAV tracks live next to the note (vs. temporary files).
-    private var tracksKept = false
     /// Move meetings' audio older than this many days to the Trash (0: never).
     var removeAudioAfterDays: Int {
         didSet {
@@ -243,7 +224,7 @@ final class Recorder {
         didSet {
             UserDefaults.standard.set(myName, forKey: "myName")
             // Only the live note follows; finished notes aren't rewritten from Settings.
-            if isRecording { writeNote() }
+            if isRecording { current?.writeNote() }
         }
     }
     /// Languages spoken in meetings. Lines that come out in any other language
@@ -278,11 +259,7 @@ final class Recorder {
     }
 
     private let engine = ParakeetEngine(version: .ultra)
-    private let separation = SpeakerSeparation()
-    /// Call audio for speaker separation; a temporary copy when audio isn't kept.
-    private var themAudio: URL?
-    /// Mic audio for the language check; a temporary copy when audio isn't kept.
-    private var meAudio: URL?
+    let separation = SpeakerSeparation()
     private var vad: VadManager?
     private var mic: MicCapture?
     private var tap: SystemAudioTap?
@@ -290,12 +267,8 @@ final class Recorder {
     private var feeders: [Task<Void, Never>] = []
     /// Each stream's input: audio, plus erase requests kept in order with it.
     private var feeds: [Speaker: AsyncStream<StreamTranscriber.Feed>.Continuation] = [:]
-    /// Each track's writer, fed before transcription (see `TrackWriter`).
-    private var writers: [Speaker: TrackWriter] = [:]
     private var events: AsyncStream<TranscriptEvent>.Continuation?
     private var eventConsumer: Task<Void, Never>?
-    /// Recovery at launch is running: the audio clean-up waits for it.
-    private var recovering = false
     private var silenceCheck: Task<Void, Never>?
     private var micSilenceCheck: Task<Void, Never>?
     private var deviceMonitor: AudioDeviceMonitor?
@@ -314,11 +287,6 @@ final class Recorder {
     private static let micStopped = "The microphone stopped after an audio device change"
     /// Counts recordings, so a delayed retry can't touch a later one.
     private var session = 0
-    /// Undo records for voices learned in this meeting, by label, so correcting
-    /// a name doesn't leave the voice remembered under the wrong one.
-    private var learned: [String: VoiceLibrary.LearnUndo] = [:]
-    /// When Wingman last wrote the note, to notice edits made outside Wingman.
-    private var noteWrittenAt: Date?
 
     init() {
         let defaults = UserDefaults.standard
@@ -348,16 +316,18 @@ final class Recorder {
 
     var isRecording: Bool { phase == .recording }
 
+    /// Recording, or a meeting still finishing in the background: quitting or
+    /// installing an update waits for it.
+    var busy: Bool { phase != .idle || pendingJoins > 0 || meetings.contains { $0.stage.isFinishing } }
+
     // MARK: - Start / stop
 
-    /// Starts recording because a call started. A Google Meet call's meeting code
-    /// picks the calendar event with the same Meet link.
     func start(for session: CallSession) async {
         await start(meetCode: session.meetingCode)
-        if isRecording {
-            callApp = session.app
-            callSessionID = session.id
-            callMeetingCode = session.meetingCode
+        if isRecording, let current {
+            current.callApp = session.app
+            current.callSessionID = session.id
+            current.callMeetingCode = session.meetingCode
         }
     }
 
@@ -385,7 +355,7 @@ final class Recorder {
             return
         }
 
-        var createdNote: URL?
+        var created: Meeting?
         do {
             phase = .preparing("Loading speech model (the first time downloads ~0.6 GB)…")
             try await engine.load()
@@ -397,69 +367,15 @@ final class Recorder {
                 return
             }
 
-            let started = Date()
-            // A name still showing from the previous meeting belongs to that one.
-            var name = meetingName
-            var fromCalendar = nameFromCalendar
-            if currentNote != nil && meetingName == appliedName {
-                name = ""
-                fromCalendar = false
-            }
-            let event: MeetingInfo?
-            switch preselection {
-            case .event(let picked): event = picked
-            case .noEvent: event = nil
-            case .unset: event = useCalendar ? CalendarLookup.currentMeeting(at: started, meetCode: meetCode) : nil
-            }
-            if let event, name.trimmingCharacters(in: .whitespaces).isEmpty, !event.title.isEmpty {
-                name = event.title
-                fromCalendar = true
-            }
-            // The previous meeting stays as it is until the new note's folder exists.
-            let base = try makeNoteBase(for: started, name: name)
-            meetingName = name
-            nameFromCalendar = fromCalendar
-            meeting = event
-            preselection = .unset
-            Log.write("calendar event: \(event == nil ? "none" : "matched")")
-            speakerNames = [:]
-            sourceFile = nil
-            voiceprints = [:]
-            voiceGuesses = [:]
-            recognized = []
-            learned = [:]
-            callApp = nil
-            callSessionID = nil
-            callMeetingCode = nil
-            appliedName = meetingName
-            lines = []
-            startedAt = started
-            endedAt = nil
-            recordingID = UUID()
-            currentNote = base.appendingPathExtension("md")
-            noteWrittenAt = nil
-            noteSaved = false
-            noteSaveError = nil
-            reportedProblems = []
-            createdNote = currentNote
-            writeNote()
-
-            tracksKept = keepAudio && keepSeparateTracks
-            let meURL = tracksKept
-                ? audioURL(base, "me")
-                : Self.scratchFile("wingman-\(recordingID.uuidString)-me.wav")
-            meAudio = meURL
-            let me = makeStream(.me, vad: vad, audio: meURL, mutedBy: muteFlag)
-            let themURL = tracksKept
-                ? audioURL(base, "them")
-                : Self.scratchFile("wingman-\(recordingID.uuidString)-them.wav")
-            themAudio = themURL
-            saveRecoveryRecord()
-            let them = makeStream(.them, vad: vad, audio: themURL)
-
-            meSink = me
-            themSink = them
-            speakersUsed = !AudioDeviceMonitor.outputIsHeadphones()
+            let meeting = try makeMeeting(started: Date(), origin: 0, meetCode: meetCode)
+            created = meeting
+            capturing = [meeting]
+            current = meeting
+            meetings.append(meeting)
+            slots = [.me: WriterSlot(), .them: WriterSlot()]
+            installWriters(for: meeting)
+            meSink = makeStream(.me, vad: vad, mutedBy: muteFlag)
+            themSink = makeStream(.them, vad: vad)
             do {
                 try startMic()
             } catch {
@@ -468,6 +384,7 @@ final class Recorder {
             startTap()
 
             phase = .recording
+            showMeeting?(meeting)
             watchForSilentSystemAudio()
             watchForSilentMicrophone()
             deviceMonitor = AudioDeviceMonitor { [weak self] in
@@ -475,13 +392,446 @@ final class Recorder {
             }
         } catch {
             await teardown()
-            // Only this attempt's files: until the new note exists, `currentNote`
-            // is still the previous meeting's, which must never be deleted.
-            if let createdNote, currentNote == createdNote { discardEmptyNote() }
+            // Only this attempt's files: a recording that never started leaves nothing behind.
+            if let created {
+                created.trashFiles()
+                forget(created)
+            }
+            current = nil
+            capturing = []
             lastError = error.localizedDescription
             phase = .idle
         }
     }
+
+    // MARK: - Transcribing a file
+
+    /// Transcribes a recording or video file instead of listening live: much
+    /// faster than playing it back, and the microphone isn't involved. Every
+    /// voice in the file counts as "Them", then goes through the same
+    /// language check, speaker separation and recognition as a live meeting,
+    /// in its own window.
+    func transcribeFile(_ url: URL) async {
+        guard phase == .idle, !quitting else { return }
+        lastError = nil
+        warning = nil
+        notice = nil
+        let scratch = Self.scratchFile("wingman-import-\(UUID().uuidString).wav")
+        var meeting: Meeting?
+        do {
+            phase = .preparing("Loading speech model…")
+            try await engine.load()
+            if vad == nil { vad = try await VadManager() }
+            guard let vad else { throw StartError("The voice detector couldn't load.") }
+
+            phase = .finishing("Reading \(url.lastPathComponent)…")
+            let samples = try await AudioExtractor.samples(from: url)
+            guard !samples.isEmpty else { throw AudioExtractorError("\(url.lastPathComponent) has no audio.") }
+            try await Task.detached { try AudioExtractor.write(samples, to: scratch) }.value
+
+            // A note like a live meeting's, named after the file.
+            let started = Date()
+            let name = url.deletingPathExtension().lastPathComponent
+            let reserved = try Self.reserveNote(for: started, name: name)
+            let created = Meeting(recorder: self, stage: .finishing("Finding speech…"), origin: 0, started: started, name: name,
+                                  event: nil, nameFromCalendar: false, base: reserved.base, prefix: reserved.prefix,
+                                  tracksKept: false, meAudio: nil, themAudio: scratch, sourceFile: url.lastPathComponent)
+            meeting = created
+            meetings.append(created)
+            showMeeting?(created)
+
+            var config = VadSegmentationConfig.default
+            config.minSilenceDuration = 0.5
+            let segments = try await vad.segmentSpeech(samples, config: config)
+            let rate = Int(Resampler.sampleRate)
+            var lines: [TranscriptLine] = []
+            for (i, segment) in segments.enumerated() {
+                let percent = Int(Double(i) / Double(max(segments.count, 1)) * 100)
+                created.setStage(.finishing("Transcribing \(url.lastPathComponent)… \(percent)%"))
+                phase = .finishing("Transcribing \(url.lastPathComponent)… \(percent)%")
+                let from = max(0, segment.startSample(sampleRate: rate))
+                let to = min(samples.count, segment.endSample(sampleRate: rate))
+                guard to > from else { continue }
+                let (text, confidence) = try await engine.transcribeScored(Array(samples[from..<to]))
+                guard !text.isEmpty else { continue }
+                lines.append(TranscriptLine(id: UUID(), speaker: .them, start: segment.startTime, end: segment.endTime,
+                                            text: text, isFinal: true, confidence: confidence))
+            }
+            created.setFileLines(lines)
+            created.finish(transcribedFrom: (samples.count, scratch))
+        } catch {
+            let message = "Couldn't transcribe \(url.lastPathComponent): \(error.localizedDescription)"
+            lastError = message
+            meeting?.lastError = message
+            meeting?.setStage(.done)
+            try? FileManager.default.removeItem(at: scratch)
+        }
+        phase = .idle
+    }
+
+    // MARK: - Meetings
+
+    /// The recording's call, app, id and start (nil when not recording).
+    var callSessionID: UUID? { current?.callSessionID }
+    var callApp: CallApp? { current?.callApp }
+    var recordingID: UUID? { current?.recordingID }
+    var startedAt: Date? { current?.startedAt }
+
+    /// The meeting with a window whose note is `url`, if any.
+    func openMeeting(note url: URL) -> Meeting? {
+        meetings.first { $0.currentNote?.standardizedFileURL == url.standardizedFileURL }
+    }
+
+    /// Meetings with a window: recording, finishing, or done and still open.
+    private(set) var meetings: [Meeting] = []
+    /// The meeting being recorded.
+    private(set) var current: Meeting?
+    /// What the menu bar, notifications and reports mean: the meeting being
+    /// recorded, else the latest one.
+    var focus: Meeting? { current ?? meetings.last }
+    /// Meetings that still take transcript lines, in recording order: the one
+    /// being recorded and, for a minute after a split, the one before it.
+    private var capturing: [Meeting] = []
+    /// Opens a meeting's window (set by the app).
+    var showMeeting: ((Meeting) -> Void)?
+    /// Closes a meeting's window (set by the app).
+    var closeMeeting: ((Meeting) -> Void)?
+    /// A new call was split off a running recording (for the notification).
+    var onSplit: ((Meeting) -> Void)?
+
+    func meeting(id: UUID) -> Meeting? { meetings.first { $0.id == id } }
+
+    /// A meeting's window was closed: once it's done it needn't stay in memory
+    /// (Meetings has it from its note).
+    func windowClosed(_ meeting: Meeting) {
+        guard meeting.stage == .done, meeting !== current else { return }
+        forget(meeting)
+    }
+
+    private func forget(_ meeting: Meeting) {
+        meetings.removeAll { $0 === meeting }
+        capturing.removeAll { $0 === meeting }
+    }
+
+    /// A meeting finished everything after its recording.
+    func meetingFinished(_ meeting: Meeting) {
+        cleanUpAudio()
+        onMeetingDone?(meeting)
+    }
+
+    /// Told when a meeting is done (for the saved notification).
+    var onMeetingDone: ((Meeting) -> Void)?
+    /// A meeting was deleted (from its window or from Meetings): the message to show.
+    var onDeleted: ((String) -> Void)?
+
+    /// The meeting's files were renamed: open track files follow renames, so
+    /// only the recovery record needs to know (the meeting saves it).
+    func tracksMoved(for meeting: Meeting) {}
+
+    /// A new meeting with its note created (numbered for the day) and, when it
+    /// will be recorded, its tracks' locations.
+    private func makeMeeting(started: Date, origin: TimeInterval, meetCode: String?) throws -> Meeting {
+        let event = useCalendar ? CalendarLookup.currentMeeting(at: started, meetCode: meetCode) : nil
+        let name = event?.title ?? ""
+        let reserved = try Self.reserveNote(for: started, name: name)
+        Log.write("calendar event: \(event == nil ? "none" : "matched")")
+        let recordingID = UUID()
+        let kept = keepAudio && keepSeparateTracks
+        let me = kept ? Self.audioURL(reserved.base, "me") : Self.scratchFile("wingman-\(recordingID.uuidString)-me.wav")
+        let them = kept ? Self.audioURL(reserved.base, "them") : Self.scratchFile("wingman-\(recordingID.uuidString)-them.wav")
+        let meeting = Meeting(recorder: self, stage: .recording, origin: origin, started: started, name: name, event: event,
+                              nameFromCalendar: !name.isEmpty, base: reserved.base, prefix: reserved.prefix,
+                              tracksKept: kept, meAudio: me, themAudio: them)
+        meeting.speakersUsed = !AudioDeviceMonitor.outputIsHeadphones()
+        return meeting
+    }
+
+    /// Points each track's slot at a new writer for the meeting's file; returns
+    /// the writers it replaced.
+    @discardableResult
+    private func installWriters(for meeting: Meeting) -> [Speaker: TrackWriter] {
+        var old: [Speaker: TrackWriter] = [:]
+        for (speaker, url) in [(Speaker.me, meeting.meAudio), (.them, meeting.themAudio)] {
+            var writer: TrackWriter?
+            if let url {
+                do {
+                    writer = try TrackWriter(url: url) { [weak meeting] problem in
+                        Task { @MainActor in meeting?.streamProblem(speaker, .audioFile(problem)) }
+                    }
+                } catch {
+                    meeting.streamProblem(speaker, .audioFile("couldn't create the file: \(Log.describe(error))"))
+                }
+            }
+            if let previous = slots[speaker]?.swap(writer) { old[speaker] = previous }
+        }
+        return old
+    }
+
+    /// Before quitting: stops a recording, then waits for everything after it
+    /// (speakers, combined audio, a file being transcribed) to finish.
+    func finishForQuit() async {
+        quitting = true
+        while phase != .idle {
+            if isRecording {
+                await stop()
+            } else {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        for meeting in meetings { await meeting.waitUntilDone() }
+        while pendingJoins > 0 { try? await Task.sleep(for: .milliseconds(100)) }
+    }
+
+    // MARK: - Stopping, splitting, joining
+
+    /// Stops recording. The meeting finishes in the background (its window shows
+    /// how far it got); `waitUntilDone` on the returned meeting waits for it.
+    @discardableResult
+    func stop() async -> Meeting? {
+        guard phase == .recording, let meeting = current else { return nil }
+        phase = .preparing("Finishing transcript…")
+        // The meeting ends now, not when the streams have drained.
+        let ended = Date()
+        for each in capturing where each.stage == .recording && each.endedAt == nil { each.setEnded(ended) }
+        await teardown()
+        current = nil
+        let ending = capturing
+        capturing = []
+        finishPendingWriters()
+        phase = .idle
+        for each in ending where each.stage == .recording { each.finish() }
+        return meeting
+    }
+
+    /// Stops recording and moves everything it saved to the Trash.
+    func discard() async {
+        guard phase == .recording, let meeting = current else { return }
+        phase = .preparing("Discarding…")
+        await teardown()
+        current = nil
+        capturing.removeAll { $0 === meeting }
+        let previous = capturing
+        capturing = []
+        finishPendingWriters()
+        for each in previous where each.stage == .recording { each.finish() }
+        let notTrashed = meeting.trashFiles()
+        forget(meeting)
+        closeMeeting?(meeting)
+        notice = notTrashed == 0
+            ? "Recording discarded — its files are in the Trash."
+            : "Recording discarded, but \(notTrashed == 1 ? "one of its files" : "\(notTrashed) of its files") couldn't be moved to the Trash: \(notTrashed == 1 ? "it's" : "they're") still in the meeting's folder."
+        phase = .idle
+    }
+
+    /// Delete Meeting… after a meeting is done: its files go to the Trash, and
+    /// nothing of it stays in Wingman. Returns what to tell the user.
+    func delete(_ meeting: Meeting) -> String {
+        guard meeting.stage == .done else { return "This meeting is still being finished." }
+        let notTrashed = meeting.trashFiles()
+        forget(meeting)
+        closeMeeting?(meeting)
+        Log.write("meeting deleted by user (files to the Trash)")
+        let message = Self.deletedMessage(notTrashed: notTrashed)
+        onDeleted?(message)
+        return message
+    }
+
+    /// What Delete Meeting tells the user.
+    static func deletedMessage(notTrashed: Int) -> String {
+        notTrashed == 0
+            ? "Its note, audio and subtitles are in the Trash."
+            : "\(notTrashed == 1 ? "One of its files" : "\(notTrashed) of its files") couldn't be moved to the Trash and \(notTrashed == 1 ? "is" : "are") still in the meeting's folder."
+    }
+
+    enum SplitReason: String {
+        /// Teams or Zoom replaced its call window: a new call in the same app.
+        case newCallWindow = "new call window"
+        /// The user asked for a new note (New Note).
+        case user = "asked"
+    }
+
+    /// After a split: the previous meeting keeps its tracks open for a minute,
+    /// so "Join with previous" can undo it; then it finishes.
+    private struct PendingSplit {
+        let previous: Meeting
+        let next: Meeting
+        let writers: [Speaker: TrackWriter]
+        let timer: Task<Void, Never>
+    }
+    private var pendingSplit: PendingSplit?
+    static let joinWindow: Duration = .seconds(60)
+
+    /// Starts a new meeting at this moment without stopping the recording: no
+    /// gap in the audio. The previous meeting finishes in the background.
+    func split(reason: SplitReason, force: Bool = false) {
+        guard phase == .recording, let previous = current, previous.stage == .recording, let started = previous.startedAt else { return }
+        // Within the first seconds the call window is still settling. (Teams'
+        // pre-join screen turns into the call in the same window, so joining
+        // isn't a new window — measured 2026-10-14.)
+        guard force || Date().timeIntervalSince(started) > 3 else {
+            Log.write("ignored a possible new call (\(reason.rawValue)) right after the recording started")
+            return
+        }
+        closePendingSplit()
+        let origin = Double(slots[.me]?.appended ?? 0) / Resampler.sampleRate
+        let next: Meeting
+        do {
+            next = try makeMeeting(started: Date(), origin: origin, meetCode: previous.callMeetingCode)
+        } catch {
+            Log.write("couldn't start a new note for a new call: \(Log.describe(error))")
+            return
+        }
+        next.callApp = previous.callApp
+        next.callSessionID = previous.callSessionID
+        next.callMeetingCode = previous.callMeetingCode
+        next.joinable = reason == .newCallWindow
+        previous.setEnded(Date())
+        let writers = installWriters(for: next)
+        current = next
+        capturing.append(next)
+        meetings.append(next)
+        Log.write("new call (\(reason.rawValue)) — started a new note \(Int(origin)) s into the recording")
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: Self.joinWindow)
+            guard !Task.isCancelled else { return }
+            self?.closePendingSplit()
+        }
+        pendingSplit = PendingSplit(previous: previous, next: next, writers: writers, timer: timer)
+        showMeeting?(next)
+        onSplit?(next)
+    }
+
+    /// The recording ends during the minute after a split: the previous
+    /// meeting's tracks are closed now.
+    private func finishPendingWriters() {
+        guard let pending = pendingSplit else { return }
+        pendingSplit = nil
+        pending.timer.cancel()
+        pending.next.joinable = false
+        for writer in pending.writers.values { writer.finish() }
+    }
+
+    #if !NO_DIAGNOSTICS
+    /// Development (recordtest --split): splits now, even right after the start,
+    /// and finishes the previous meeting at once.
+    func splitNow() {
+        split(reason: .user, force: true)
+        closePendingSplit()
+    }
+
+    /// Development: a split as a new call window makes it (Join with Previous
+    /// stays possible for a minute), for `recordtest --join`.
+    func splitAsNewCall() {
+        split(reason: .newCallWindow, force: true)
+    }
+    #endif
+
+    /// The minute after a split is over: the previous meeting stops taking lines
+    /// and finishes.
+    private func closePendingSplit() {
+        guard let pending = pendingSplit else { return }
+        pendingSplit = nil
+        pending.timer.cancel()
+        pending.next.joinable = false
+        capturing.removeAll { $0 === pending.previous }
+        Task {
+            for writer in pending.writers.values { _ = await Task.detached { writer.finish() }.value }
+            pending.previous.finish()
+        }
+    }
+
+    /// "Join with previous": the split was wrong. The new meeting's audio and
+    /// lines go back onto the previous one, which records on; the new note goes.
+    func join(_ next: Meeting) {
+        guard let pending = pendingSplit, pending.next === next, next === current, next.stage == .recording else { return }
+        pendingSplit = nil
+        pending.timer.cancel()
+        let previous = pending.previous
+        // Audio: what the new tracks hold goes onto the old ones, in order, then
+        // live audio follows. The new meeting's files go only once that's
+        // confirmed; a track that couldn't be appended is kept next to the note.
+        var appends: [Task<(Speaker, Bool, URL?), Never>] = []
+        for (speaker, oldWriter) in pending.writers {
+            guard let slot = slots[speaker] else { continue }
+            appends.append(Task {
+                await withCheckedContinuation { continuation in
+                    slot.rejoin(oldWriter, read: joinRead) { ok, url in continuation.resume(returning: (speaker, ok, url)) }
+                }
+            })
+        }
+        let shift = next.origin - previous.origin
+        let moved = next.lines.map { line -> TranscriptLine in
+            var line = line
+            line.start += shift
+            line.end += shift
+            return line
+        }
+        previous.adopt(moved)
+        previous.setEnded(nil)
+        next.replaceLines([])
+        current = previous
+        capturing.removeAll { $0 === next }
+        forget(next)
+        closeMeeting?(next)
+        showMeeting?(previous)
+        Log.write("new note joined back with the previous one (user)")
+        pendingJoins += 1
+        Task {
+            var kept: [String] = []
+            for append in appends {
+                let (speaker, ok, url) = await append.value
+                guard !ok, let url else { continue }
+                if let moved = Self.keepJoinLeftover(url, speaker: speaker, beside: previous.currentNote) { kept.append(moved) }
+            }
+            next.trashFiles()
+            if !kept.isEmpty {
+                Log.write("joined, but some audio couldn't be moved onto the previous meeting's tracks; kept beside the note")
+                previous.setWarning("Joined, but some audio couldn't be added to this meeting's recording. It’s kept next to the note (\(kept.joined(separator: ", "))).")
+            }
+            pendingJoins -= 1
+        }
+    }
+
+    /// Joins whose audio is still being moved (quitting and updates wait).
+    private(set) var pendingJoins = 0
+    /// Reads a track for a join (tests replace it to force failures).
+    var joinRead: @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) }
+
+    /// A track a join couldn't append: moved next to `note` as
+    /// "<note>-joined-me.wav" (never into the Trash). Returns its file name.
+    nonisolated static func keepJoinLeftover(_ url: URL, speaker: Speaker, beside note: URL?) -> String? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        let folder = note?.deletingLastPathComponent() ?? url.deletingLastPathComponent()
+        let base = note?.deletingPathExtension().lastPathComponent ?? url.deletingPathExtension().lastPathComponent
+        var target = folder.appendingPathComponent("\(base)-joined-\(speaker == .me ? "me" : "them").wav")
+        var n = 2
+        while fm.fileExists(atPath: target.path) {
+            target = folder.appendingPathComponent("\(base)-joined-\(speaker == .me ? "me" : "them") \(n).wav")
+            n += 1
+        }
+        do {
+            try fm.moveItem(at: url, to: target)
+            return target.lastPathComponent
+        } catch {
+            return url.lastPathComponent
+        }
+    }
+
+    /// Where transcript lines go: the latest meeting (still taking lines) that
+    /// started at or before the line; times become the meeting's own.
+    private func route(_ event: TranscriptEvent) {
+        guard let target = capturing.last(where: { $0.origin <= event.start + 0.01 }) ?? capturing.first else { return }
+        // A line that started before a split stays with the meeting it started in.
+        let owner = capturing.first { $0.lines.contains { $0.id == event.utteranceID } } ?? target
+        let shifted = TranscriptEvent(utteranceID: event.utteranceID, speaker: event.speaker,
+                                      start: max(0, event.start - owner.origin), end: max(0, event.end - owner.origin),
+                                      text: event.text, isFinal: event.isFinal, confidence: event.confidence, failed: event.failed)
+        owner.handle(shifted)
+    }
+
+    /// Each track's current writer, swapped at a split (see `WriterSlot`).
+    private var slots: [Speaker: WriterSlot] = [:]
 
     /// Downloads what the first recording and the first language review need,
     /// right after setup, so a first real call doesn't wait for ~2 GB of
@@ -514,18 +864,6 @@ final class Recorder {
         }
     }
 
-    /// Before quitting: stops a recording, then waits for everything after it
-    /// (speakers, combined audio, a file being transcribed) to finish.
-    func finishForQuit() async {
-        quitting = true
-        while phase != .idle {
-            if isRecording {
-                await stop()
-            } else {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-        }
-    }
 
     private func startMic() throws {
         guard let meSink else { return }
@@ -637,11 +975,11 @@ final class Recorder {
             startTap()
         }
 
-        let elapsed = startedAt.map { Self.timestamp(Date().timeIntervalSince($0)) } ?? ""
-        if !AudioDeviceMonitor.outputIsHeadphones() { speakersUsed = true }
+        let elapsed = current?.startedAt.map { Self.timestamp(Date().timeIntervalSince($0)) } ?? ""
+        if !AudioDeviceMonitor.outputIsHeadphones() { current?.speakersUsed = true }
         let output = AudioDeviceMonitor.defaultOutputName() ?? "new output"
         let input = AudioDeviceMonitor.defaultInputName() ?? "new microphone"
-        notice = "Audio devices changed at \(elapsed) — now listening on \(input), call audio from \(output)."
+        current?.notice = "Audio devices changed at \(elapsed) — now listening on \(input), call audio from \(output)."
         Log.write("reconnected capture (\(reason)) — input \(input), output \(output)")
     }
 
@@ -650,196 +988,14 @@ final class Recorder {
         init(_ message: String) { errorDescription = message }
     }
 
-    /// A recording that never started leaves no files behind.
-    private func discardEmptyNote() {
-        guard let note = currentNote else { return }
-        let base = note.deletingPathExtension()
-        for url in [note, audioURL(base, "me"), audioURL(base, "them")] {
-            try? FileManager.default.removeItem(at: url)
-        }
-        for url in [themAudio, meAudio].compactMap({ $0 }) { try? FileManager.default.removeItem(at: url) }
-        themAudio = nil
-        meAudio = nil
-        RecordingRecovery.remove(id: recordingID, in: Self.scratchFolder)
-        currentNote = nil
-        startedAt = nil
-    }
-
     // MARK: - Transcribing a file
-
-    /// Transcribes a recording or video file instead of listening live: much
-    /// faster than playing it back, and the microphone isn't involved. Every
-    /// voice in the file counts as "Them", then goes through the same
-    /// language check, speaker separation and recognition as a live meeting.
-    func transcribeFile(_ url: URL) async {
-        guard phase == .idle, !quitting else { return }
-        lastError = nil
-        warning = nil
-        notice = nil
-        let scratch = Self.scratchFile("wingman-import-\(UUID().uuidString).wav")
-        do {
-            phase = .preparing("Loading speech model…")
-            try await engine.load()
-            if vad == nil { vad = try await VadManager() }
-            guard let vad else { throw StartError("The voice detector couldn't load.") }
-
-            phase = .finishing("Reading \(url.lastPathComponent)…")
-            let samples = try await AudioExtractor.samples(from: url)
-            guard !samples.isEmpty else { throw AudioExtractorError("\(url.lastPathComponent) has no audio.") }
-            try await Task.detached { try AudioExtractor.write(samples, to: scratch) }.value
-
-            // Set up a note like a live meeting, named after the file.
-            let started = Date()
-            let name = url.deletingPathExtension().lastPathComponent
-            let base = try makeNoteBase(for: started, name: name)
-            meetingName = name
-            nameFromCalendar = false
-            preselection = .unset
-            speakerNames = [:]
-            voiceprints = [:]
-            voiceGuesses = [:]
-            recognized = []
-            learned = [:]
-            callApp = nil
-            callSessionID = nil
-            callMeetingCode = nil
-            meeting = nil
-            sourceFile = url.lastPathComponent
-            appliedName = meetingName
-            lines = []
-            startedAt = started
-            endedAt = started.addingTimeInterval(Double(samples.count) / Resampler.sampleRate)
-            currentNote = base.appendingPathExtension("md")
-            noteWrittenAt = nil
-            noteSaved = false
-            noteSaveError = nil
-            reportedProblems = []
-            tracksKept = false
-            meAudio = nil
-            themAudio = scratch
-
-            phase = .finishing("Finding speech…")
-            var config = VadSegmentationConfig.default
-            config.minSilenceDuration = 0.5
-            let segments = try await vad.segmentSpeech(samples, config: config)
-            let rate = Int(Resampler.sampleRate)
-            for (i, segment) in segments.enumerated() {
-                phase = .finishing("Transcribing \(url.lastPathComponent)… \(Int(Double(i) / Double(max(segments.count, 1)) * 100))%")
-                let from = max(0, segment.startSample(sampleRate: rate))
-                let to = min(samples.count, segment.endSample(sampleRate: rate))
-                guard to > from else { continue }
-                let (text, confidence) = try await engine.transcribeScored(Array(samples[from..<to]))
-                guard !text.isEmpty else { continue }
-                lines.append(TranscriptLine(id: UUID(), speaker: .them, start: segment.startTime, end: segment.endTime,
-                                            text: text, isFinal: true, confidence: confidence))
-            }
-            writeNote()
-            await checkLanguages()
-            await separateSpeakers()
-            _ = await saveCombinedAudio()
-        } catch {
-            lastError = "Couldn't transcribe \(url.lastPathComponent): \(error.localizedDescription)"
-        }
-        try? FileManager.default.removeItem(at: scratch)
-        themAudio = nil
-        phase = .idle
-        cleanUpAudio()
-    }
-
-    /// Stops recording and moves everything it saved to the Trash.
-    func discard() async {
-        guard phase == .recording else { return }
-        phase = .finishing("Discarding…")
-        await teardown()
-        let fm = FileManager.default
-        var notTrashed = 0
-        if let note = currentNote {
-            let folder = note.deletingLastPathComponent()
-            let base = note.deletingPathExtension().lastPathComponent
-            for suffix in Self.companionSuffixes {
-                let url = folder.appendingPathComponent(base + suffix)
-                guard fm.fileExists(atPath: url.path) else { continue }
-                do {
-                    try fm.trashItem(at: url, resultingItemURL: nil)
-                } catch {
-                    notTrashed += 1
-                    Log.write("couldn't move a discarded file to the Trash: \(Log.describe(error))")
-                }
-            }
-        }
-        // Temporary tracks (audio not kept) are Wingman's own scratch files; kept
-        // tracks were handled above, and never get deleted outright.
-        if !tracksKept {
-            for url in [meAudio, themAudio].compactMap({ $0 }) where fm.fileExists(atPath: url.path) {
-                try? fm.removeItem(at: url)
-            }
-        }
-        RecordingRecovery.remove(id: recordingID, in: Self.scratchFolder)
-        meAudio = nil
-        themAudio = nil
-        lines = []
-        currentNote = nil
-        startedAt = nil
-        callApp = nil
-        callSessionID = nil
-        callMeetingCode = nil
-        meeting = nil
-        meetingName = ""
-        appliedName = ""
-        nameFromCalendar = false
-        notice = notTrashed == 0
-            ? "Recording discarded — its files are in the Trash."
-            : "Recording discarded, but \(notTrashed == 1 ? "one of its files" : "\(notTrashed) of its files") couldn't be moved to the Trash: \(notTrashed == 1 ? "it's" : "they're") still in the meeting's folder."
-        phase = .idle
-    }
-
-    /// Names to offer when renaming a speaker: invited people not already used.
-    var suggestedNames: [String] {
-        guard let meeting else { return [] }
-        let used = Set(speakerNames.values)
-        var names = meeting.attendees
-        if let organizer = meeting.organizer, !names.contains(organizer) { names.insert(organizer, at: 0) }
-        return names.filter { !used.contains($0) }
-    }
-
-    func stop() async {
-        guard phase == .recording else { return }
-        phase = .finishing("Finishing transcript…")
-        await teardown()
-        endedAt = Date()
-        applyMeetingName()
-        writeNote()
-        await checkLanguages()
-        await separateSpeakers()
-        let saved = await saveCombinedAudio()
-        if tracksKept {
-            await compressTracks()
-        } else if saved {
-            for url in [meAudio, themAudio].compactMap({ $0 }) { try? FileManager.default.removeItem(at: url) }
-        } else if keepTemporaryTracks() {
-            warning = (warning ?? "") + " The separate tracks were kept next to the note instead."
-        } else {
-            warning = (warning ?? "") + " The separate tracks couldn't be kept either."
-        }
-        meAudio = nil
-        themAudio = nil
-        RecordingRecovery.remove(id: recordingID, in: Self.scratchFolder)
-        phase = .idle
-        cleanUpAudio()
-    }
-
-    /// What the next launch needs to finish this recording's audio if Wingman
-    /// doesn't get to (see `RecordingRecovery`).
-    private func saveRecoveryRecord() {
-        guard let note = currentNote, isRecording || phase != .idle else { return }
-        let record = RecordingRecovery.Record(note: note, tracks: [meAudio, themAudio].compactMap { $0 }, keepAudio: keepAudio,
-                                              tracksKept: tracksKept, started: startedAt ?? Date())
-        RecordingRecovery.save(record, id: recordingID, in: Self.scratchFolder)
-    }
 
     /// At launch, before anything can start recording: finishes the audio of
     /// recordings Wingman didn't get to finish, then clears old scratch audio.
     func recoverInterruptedRecordings() {
+        // Only what an earlier session left is ever cleaned up: anything this
+        // session writes is newer than this.
+        let launched = Date()
         let records = RecordingRecovery.leftovers(in: Self.scratchFolder)
         // Tracks a record covers are its own, not orphans.
         let covered = Set(records.flatMap(\.record.tracks).map(\.standardizedFileURL))
@@ -849,12 +1005,13 @@ final class Recorder {
             return orphan.tracks.isEmpty ? nil : orphan
         }
         guard !records.isEmpty || !orphans.isEmpty else {
-            removeLeftoverScratch()
+            removeLeftoverScratch(olderThan: launched)
             return
         }
         Log.write("finishing the audio of \(records.count + orphans.count) interrupted recording(s)")
         let all = records.map(\.record) + orphans
-        recovering = true
+        let keys = Set(all.map { AudioCleanup.key(for: $0.note) })
+        audioInUse.formUnion(keys)
         Task {
             var recovered = 0
             for (i, record) in all.enumerated() {
@@ -864,9 +1021,8 @@ final class Recorder {
                                  outcome.seconds, outcome.combinedSaved ? "saved" : "not saved"))
                 if outcome.seconds > 0 { recovered += 1 }
             }
-            recovering = false
-            removeLeftoverScratch()
-            cleanUpAudio()
+            audioInUse.subtract(keys)
+            removeLeftoverScratch(olderThan: launched)
             if recovered > 0, notice == nil {
                 notice = recovered == 1
                     ? "Wingman stopped during a meeting before it could finish. Its audio was recovered and saved next to its note."
@@ -875,152 +1031,29 @@ final class Recorder {
         }
     }
 
-    /// The separate tracks are recorded as WAV next to the note, so they survive
-    /// Wingman quitting mid-meeting; once the meeting is done they're kept as
-    /// .m4a, about a tenth of the size. A WAV stays if its copy couldn't be made.
-    private func compressTracks() async {
-        phase = .finishing("Saving audio…")
-        let fm = FileManager.default
-        for speaker in [Speaker.me, .them] {
-            guard let track = speaker == .me ? meAudio : themAudio else { continue }
-            let copy = Self.scratchFile("wingman-\(UUID().uuidString).m4a")
-            do {
-                try await Task.detached(priority: .userInitiated) { try AudioMix.mix([track], to: copy) }.value
-                // Renaming the meeting meanwhile moves the track: follow it.
-                guard let current = speaker == .me ? meAudio : themAudio else { continue }
-                let output = current.deletingPathExtension().appendingPathExtension("m4a")
-                try? fm.removeItem(at: output)
-                try fm.moveItem(at: copy, to: output)
-                try fm.removeItem(at: current)
-            } catch {
-                try? fm.removeItem(at: copy)
-                Log.write("couldn't compress the \(speaker) track, kept the WAV: \(Log.describe(error))")
-            }
-        }
-    }
-
     /// Applies the audio rules from Settings → Audio in the background. Never
     /// while a meeting is recording or finishing, and never to the meeting in
     /// the window.
     func cleanUpAudio() {
-        guard phase == .idle, !recovering, removeAudioAfterDays > 0 || audioLimitGB > 0 else { return }
-        let keep = Set([currentNote].compactMap { $0.map(AudioCleanup.key(for:)) })
+        guard phase == .idle, removeAudioAfterDays > 0 || audioLimitGB > 0 else { return }
+        let keep = Set(meetings.compactMap { $0.currentNote.map(AudioCleanup.key(for:)) }).union(audioInUse)
+        // The newest start per note: a number reused after a note was removed
+        // in Finder mustn't make the new meeting look older.
+        let known = Dictionary(index.meetings.compactMap { m in m.started.map { (m.key, $0) } }, uniquingKeysWith: max)
         let (days, limit, folder, previous) = (removeAudioAfterDays, audioLimitGB, Self.notesFolder, cleanup)
         cleanup = Task.detached(priority: .utility) {
             await previous?.value
-            AudioCleanup.run(in: folder, maxAgeDays: days, limitGB: limit, keep: keep)
+            AudioCleanup.run(in: folder, maxAgeDays: days, limitGB: limit, keep: keep, known: known)
         }
     }
 
     func cleanupFinished() async { await cleanup?.value }
 
-    /// Writes "<meeting>.m4a": both sides mixed into one small file. Returns
-    /// false only when that was wanted and failed.
-    private func saveCombinedAudio() async -> Bool {
-        guard keepAudio, let note = currentNote else { return true }
-        let tracks = [meAudio, themAudio].compactMap { $0 }
-        guard !tracks.isEmpty else { return true }
-        phase = .finishing("Saving audio…")
-        let output = note.deletingPathExtension().appendingPathExtension("m4a")
-        do {
-            try await Task.detached(priority: .userInitiated) { try AudioMix.mix(tracks, to: output) }.value
-            return true
-        } catch {
-            warning = "Couldn't save the combined audio (\(error.localizedDescription))."
-            Log.write("combined audio failed: \(Log.describe(error))")
-            return false
-        }
-    }
-
-    /// The combined audio failed: rather than delete the only copy of the
-    /// meeting's audio, move the temporary tracks next to the note.
-    /// Moves the temporary tracks next to the note; true when every one made it.
-    private func keepTemporaryTracks() -> Bool {
-        guard let note = currentNote else { return false }
-        let base = note.deletingPathExtension()
-        var kept = true
-        for (url, suffix) in [(meAudio, "me"), (themAudio, "them")] {
-            guard let url, FileManager.default.fileExists(atPath: url.path) else { continue }
-            do {
-                try FileManager.default.moveItem(at: url, to: audioURL(base, suffix))
-            } catch {
-                Log.write("couldn't keep the \(suffix) track: \(Log.describe(error))")
-                kept = false
-            }
-        }
-        return kept
-    }
-
-    /// The after-meeting language review (see LanguageReview): lines the live
-    /// engine was unsure about, or that came out in a language that isn't
-    /// enabled, are transcribed again from their audio. Echoes are filtered
-    /// again afterwards, since the two copies may only now read alike.
-    private func checkLanguages() async {
-        var audio: [Speaker: URL] = [:]
-        if let meAudio { audio[.me] = meAudio }
-        if let themAudio { audio[.them] = themAudio }
-        let enabled = enabledLanguages
-        let snapshot = lines
-        guard snapshot.contains(where: { LanguageReview.needsReview($0, enabled: enabled) }) else { return }
-
-        phase = .finishing("Reviewing languages…")
-        let fixes = await LanguageReview.fixes(for: snapshot, audio: audio, enabled: enabled, main: mainLanguage) {
-            [weak self] message in self?.phase = .finishing(message)
-        }
-        for fix in fixes {
-            guard let index = lines.firstIndex(where: { $0.id == snapshot[fix.index].id }) else { continue }
-            lines[index].text = fix.text
-            if fix.languageFixed { lines[index].rechecked = true }
-        }
-        for line in lines where line.isFinal && line.speaker == .them { removeEchoes(around: line) }
-        writeNote()
-    }
-
-    /// Relabels "Them" lines as Them 1, Them 2, … using the call-audio track.
-    private func separateSpeakers() async {
-        guard let audio = themAudio else { return }
-        let themIndices = lines.indices.filter { lines[$0].speaker == .them && lines[$0].isFinal }
-        guard themIndices.count > 1 else { return }
-
-        phase = .finishing("Identifying speakers (the first time downloads ~20 MB)…")
-        do {
-            let result = try await separation.separate(audio)
-            let numbered = SpeakerSeparation.numbered(result.turns, themIndices.map { (lines[$0].start, lines[$0].end) })
-            for (index, voice) in zip(themIndices, numbered.voices) {
-                lines[index].voice = voice
-            }
-            if numbered.ids.isEmpty {
-                // One remote voice: it keeps the plain "Them" label.
-                if result.voiceprints.count == 1, let only = result.voiceprints.values.first { voiceprints["Them"] = only }
-            } else {
-                for (number, id) in numbered.ids {
-                    if let print = result.voiceprints[id] { voiceprints["Them \(number)"] = print }
-                }
-            }
-            recognizePeople()
-            writeNote()
-        } catch {
-            warning = "Couldn't tell the other speakers apart (\(error.localizedDescription)). They're all labeled \"Them\"."
-        }
-    }
+    /// Meetings (by key) whose audio something else is reading, such as a search
+    /// for voices in an older meeting: the clean-up leaves them alone meanwhile.
+    var audioInUse: Set<String> = []
 
     // MARK: - Export
-
-    /// Writes the current transcript as subtitles next to the note and returns the file.
-    func exportSubtitles(_ format: SubtitleExport.Format) -> URL? {
-        applyMeetingName()
-        guard let currentNote, lines.contains(where: \.isFinal) else { return nil }
-        let url = currentNote.deletingPathExtension().appendingPathExtension(format.rawValue)
-        do {
-            let title = meetingName.trimmingCharacters(in: .whitespaces)
-            try SubtitleExport.render(lines, as: format, title: title.isEmpty ? nil : title, names: exportNames)
-                .write(to: url, atomically: true, encoding: .utf8)
-            return url
-        } catch {
-            lastError = "Couldn't save \(url.lastPathComponent): \(error.localizedDescription)"
-            return nil
-        }
-    }
 
     private func teardown() async {
         callMuted = nil
@@ -1043,13 +1076,13 @@ final class Recorder {
         feeds.values.forEach { $0.finish() }
         for feeder in feeders { await feeder.value }
         for stream in streams { await stream.finish() }
-        for writer in writers.values { writer.finish() }
-        // Every line the streams produced is in `lines` before the meeting is finished.
+        for slot in slots.values { slot.swap(nil)?.finish() }
+        // Every line the streams produced is in its meeting before it's finished.
         events?.finish()
         await eventConsumer?.value
         events = nil
         eventConsumer = nil
-        writers = [:]
+        slots = [:]
         feeds = [:]
         feeders = []
         streams = []
@@ -1062,32 +1095,23 @@ final class Recorder {
         let (stream, continuation) = AsyncStream<TranscriptEvent>.makeStream(bufferingPolicy: .unbounded)
         events = continuation
         eventConsumer = Task { @MainActor [weak self] in
-            for await event in stream { self?.handle(event) }
+            for await event in stream { self?.route(event) }
         }
     }
 
     /// Creates the transcriber for one stream and returns the callback the
     /// audio thread uses to hand it samples (in order, without blocking).
-    private func makeStream(_ speaker: Speaker, vad: VadManager, audio: URL?, mutedBy flag: LockedFlag? = nil) -> ([Float]) -> Void {
+    private func makeStream(_ speaker: Speaker, vad: VadManager, mutedBy flag: LockedFlag? = nil) -> ([Float]) -> Void {
         if events == nil { startEvents() }
         let events = events
         let stream = StreamTranscriber(speaker: speaker, engine: engine, vad: vad, onProblem: { [weak self] problem in
-            Task { @MainActor in self?.streamProblem(speaker, problem) }
+            Task { @MainActor in self?.current?.streamProblem(speaker, problem) }
         }) { event in
             events?.yield(event)
         }
-        // The track is written from the capture thread's side, ahead of transcription.
-        var writer: TrackWriter?
-        if let audio {
-            do {
-                writer = try TrackWriter(url: audio) { [weak self] problem in
-                    Task { @MainActor in self?.streamProblem(speaker, .audioFile(problem)) }
-                }
-            } catch {
-                streamProblem(speaker, .audioFile("couldn't create the file: \(Log.describe(error))"))
-            }
-        }
-        writers[speaker] = writer
+        // The track is written from the capture thread's side, ahead of transcription,
+        // into whichever meeting's file the slot points at.
+        let slot = slots[speaker]
         let (input, continuation) = AsyncStream<StreamTranscriber.Feed>.makeStream(bufferingPolicy: .unbounded)
         feeders.append(Task.detached(priority: .userInitiated) {
             for await item in input { await stream.take(item) }
@@ -1095,7 +1119,7 @@ final class Recorder {
         streams.append(stream)
         feeds[speaker] = continuation
         let aligner = ClockAligner { samples in
-            writer?.append(samples)
+            slot?.append(samples)
             continuation.yield(.samples(samples))
         }
         // Muted audio becomes silence rather than a gap, so the tracks stay aligned.
@@ -1188,64 +1212,6 @@ final class Recorder {
 
     // MARK: - Transcript
 
-    private func handle(_ event: TranscriptEvent) {
-        let index = lines.firstIndex { $0.id == event.utteranceID }
-        if event.isFinal && event.failed {
-            // Recognition failed, which isn't silence: keep what was shown so far, marked.
-            guard let index, !lines[index].text.isEmpty else {
-                if let index { lines.remove(at: index) }
-                return
-            }
-            lines[index].isFinal = true
-            lines[index].incomplete = true
-            lines[index].end = event.end
-            writeNote()
-            return
-        }
-        if event.isFinal && event.text.isEmpty {
-            if let index { lines.remove(at: index) }
-            return
-        }
-        let line = TranscriptLine(id: event.utteranceID, speaker: event.speaker, start: event.start,
-                                  end: event.end, text: event.text, isFinal: event.isFinal,
-                                  confidence: event.confidence)
-        if let index {
-            lines[index] = line
-        } else if !event.text.isEmpty {
-            let position = lines.firstIndex { $0.start > line.start } ?? lines.endIndex
-            lines.insert(line, at: position)
-        }
-        if event.isFinal {
-            removeEchoes(around: line)
-            writeNote()
-        }
-    }
-
-    /// Safety net for echo: if the mic picked up the call from the speakers,
-    /// the same words show up as both "Them" and "Me" at the same moment.
-    /// Keep the "Them" copy.
-    /// On speakers the microphone also hears the call. A line of yours that
-    /// clearly repeats theirs is that echo and goes; one that's only similar
-    /// stays, marked, since it may be a real reply ("We should *not* deploy").
-    private func removeEchoes(around line: TranscriptLine) {
-        guard speakersUsed else { return }
-        let others = lines.filter {
-            $0.isFinal && $0.speaker != line.speaker
-                && $0.start < line.end + 1.5 && line.start < $0.end + 1.5
-        }
-        for other in others {
-            let (mine, theirs) = line.speaker == .me ? (line, other) : (other, line)
-            switch Self.echoVerdict(mine: mine.text, theirs: theirs.text, delay: mine.start - theirs.start) {
-            case .echo:
-                lines.removeAll { $0.id == mine.id }
-            case .possible:
-                if let i = lines.firstIndex(where: { $0.id == mine.id }) { lines[i].possibleEcho = true }
-            case .none:
-                break
-            }
-        }
-    }
-
     /// Whether two lines said at about the same time are the same words. A
     /// short line counts only if it matches exactly: "Sí" is a real reply,
     /// not an echo, just because the other side also said "sí" in a sentence.
@@ -1262,13 +1228,23 @@ final class Recorder {
     /// order, the same negations, starting with or just after theirs (`delay`
     /// seconds). A line that merely shares most of its words (the old test) is
     /// kept and marked: "I was right, you were wrong" isn't an echo of the reverse.
+    ///
+    /// An echo never adds a negation: my line saying theirs with a "not" more
+    /// ("I cannot approve this" after "I can approve this") is a reply, and isn't
+    /// even marked. A heuristic: speech recognition can also add a "not" to a real
+    /// echo, which then stays unmarked. One "not" fewer (recognition can drop one)
+    /// stays marked.
     static func echoVerdict(mine: String, theirs: String, delay: TimeInterval) -> EchoVerdict {
-        let a = words(mine), b = words(theirs)
+        let a = expanded(words(mine)), b = expanded(words(theirs))
         guard !a.isEmpty, !b.isEmpty else { return .none }
         let lengthRatio = Double(min(a.count, b.count)) / Double(max(a.count, b.count))
         if (-0.5...1.5).contains(delay), a.count >= 3, lengthRatio >= 0.75,
            orderedSimilarity(a, b) >= 0.85, negations(a) == negations(b) {
             return .echo
+        }
+        let plainA = withoutNegations(a), plainB = withoutNegations(b)
+        if negations(a).count > negations(b).count, !plainA.isEmpty, orderedSimilarity(plainA, plainB) >= 0.85 {
+            return .none
         }
         let sa = Set(a), sb = Set(b)
         let shared = min(sa.count, sb.count) < 3
@@ -1313,6 +1289,32 @@ final class Recorder {
         words.filter(negationWords.contains)
     }
 
+    /// The words without negations, nor the "do" that only carries one
+    /// ("we don't ship" against "we ship").
+    private static func withoutNegations(_ words: [String]) -> [String] {
+        var kept: [String] = []
+        for (i, word) in words.enumerated() where !negationWords.contains(word) {
+            let carriesNot = ["do", "does", "did"].contains(word) && i + 1 < words.count && negationWords.contains(words[i + 1])
+            if !carriesNot { kept.append(word) }
+        }
+        return kept
+    }
+
+    /// "can't" and "cannot" become "can not", "don't" becomes "do not", so every
+    /// way of saying it counts as one "not" next to the same verb.
+    static func expanded(_ words: [String]) -> [String] {
+        words.flatMap { word -> [String] in
+            switch word {
+            case "cannot", "can't": return ["can", "not"]
+            case "won't": return ["will", "not"]
+            case "shan't": return ["shall", "not"]
+            default:
+                guard word.hasSuffix("n't"), word.count > 3 else { return [word] }
+                return [String(word.dropLast(3)), "not"]
+            }
+        }
+    }
+
     /// Lowercased words; apostrophes stay inside them ("don't" is one word).
     private static func words(_ s: String) -> [String] {
         s.lowercased().replacingOccurrences(of: "’", with: "'")
@@ -1323,22 +1325,14 @@ final class Recorder {
 
     // MARK: - Files
 
-    /// Picks the files' place and time prefix for a new note named `name`.
-    /// Changes nothing else, so a failure leaves the previous meeting as it was.
-    private func makeNoteBase(for date: Date, name: String) throws -> URL {
+    /// Claims the next number in the day's folder for a new note named `name`
+    /// (see `NoteNaming.reserve`) and returns the files' base and prefix.
+    static func reserveNote(for date: Date, name: String) throws -> (base: URL, prefix: String) {
         let fm = FileManager.default
-        try Self.createNotesFolder()
-        let folder = Self.notesFolder.appendingPathComponent(Self.dayFolderName(for: date), isDirectory: true)
+        try createNotesFolder()
+        let folder = notesFolder.appendingPathComponent(dayFolderName(for: date), isDirectory: true)
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        let time = Self.timeOfDay(date)
-        var prefix = time
-        var n = 2
-        while fm.fileExists(atPath: base(in: folder, prefix: prefix, name: name).appendingPathExtension("md").path) {
-            prefix = "\(time) (\(n))"
-            n += 1
-        }
-        timePrefix = prefix
-        return base(in: folder, prefix: prefix, name: name)
+        return try NoteNaming.reserve(in: folder, day: dayFolderName(for: date), name: fileSafe(name))
     }
 
     /// "2026-10-02". Both this and the time are in local time (DateFormatter's
@@ -1359,13 +1353,6 @@ final class Recorder {
         return formatter.string(from: date)
     }
 
-    /// "17-07 Weekly sync" — time first so files sort, then the meeting name.
-    private func base(in folder: URL, prefix: String? = nil, name: String? = nil) -> URL {
-        let prefix = prefix ?? timePrefix
-        let name = Self.fileSafe(name ?? meetingName)
-        return folder.appendingPathComponent(name.isEmpty ? prefix : "\(prefix) \(name)")
-    }
-
     /// Wingman's own folder for audio it only needs while working — the tracks of
     /// a meeting whose audio isn't kept, file imports, compression — so a crash
     /// can't leave meeting audio lying around: whatever is here at launch goes.
@@ -1382,16 +1369,36 @@ final class Recorder {
 
     /// At launch nothing is being recorded, so scratch audio still here (and,
     /// from versions before 0.8.1, in the temporary folder) was left by a crash.
-    func removeLeftoverScratch() {
-        guard phase == .idle else { return }
+    /// Scratch audio and recovery records an earlier session left. Recovery
+    /// runs in the background, so a meeting can be recorded and finishing
+    /// meanwhile: only files last written before `launched` go, and never one
+    /// a meeting in this session uses.
+    func removeLeftoverScratch(olderThan launched: Date) {
+        let inUse = Set(meetings.flatMap { [$0.meAudio, $0.themAudio] }.compactMap { $0?.standardizedFileURL })
+            .union((pendingSplit?.writers.values.map(\.url) ?? []).map(\.standardizedFileURL))
+        let leftovers = Self.leftoverScratch(in: Self.scratchFolder, temporary: FileManager.default.temporaryDirectory,
+                                             olderThan: launched, inUse: inUse)
         let fm = FileManager.default
-        var leftovers = (try? fm.contentsOfDirectory(at: Self.scratchFolder, includingPropertiesForKeys: nil)) ?? []
-        leftovers += ((try? fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.lastPathComponent.hasPrefix("wingman-") && ["wav", "m4a"].contains($0.pathExtension) }
         var removed = 0
         for url in leftovers where (try? fm.removeItem(at: url)) != nil { removed += 1 }
         if removed > 0 { Log.write("removed \(removed) leftover scratch audio file\(removed == 1 ? "" : "s") from an earlier session") }
         if removed < leftovers.count { Log.write("couldn't remove \(leftovers.count - removed) leftover scratch audio file(s)") }
+    }
+
+    /// Files in the scratch folder, and Wingman's audio in the temporary folder,
+    /// last modified before `date` and not in `inUse`.
+    nonisolated static func leftoverScratch(in scratch: URL, temporary: URL, olderThan date: Date, inUse: Set<URL>) -> [URL] {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
+        var candidates = (try? fm.contentsOfDirectory(at: scratch, includingPropertiesForKeys: keys)) ?? []
+        candidates += ((try? fm.contentsOfDirectory(at: temporary, includingPropertiesForKeys: keys)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("wingman-") && ["wav", "m4a"].contains($0.pathExtension) }
+        return candidates.filter { url in
+            guard !inUse.contains(url.standardizedFileURL),
+                  let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            else { return false }
+            return modified < date
+        }
     }
 
     /// A meeting name usable in a file name: no separators, and short enough —
@@ -1411,74 +1418,14 @@ final class Recorder {
         return kept.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
     }
 
-    /// 255 bytes minus the prefix ("HH-mm (99) ") and suffix, with room to spare.
+    /// 255 bytes minus the prefix ("2026-10-07_100_") and suffix, with room to spare.
     static let maxNameBytes = 200
 
-    private static let companionSuffixes = [".md", ".m4a", "-me.m4a", "-them.m4a", "-me.wav", "-them.wav", ".vtt", ".srt"]
-
-    /// Renames the current meeting's files to match `meetingName`. Safe while
-    /// recording: open audio files keep writing after a rename.
-    func applyMeetingName() {
-        if meetingName != meeting?.title { nameFromCalendar = false }
-        guard let note = currentNote, meetingName != appliedName else { return }
-        let folder = note.deletingLastPathComponent()
-        let oldBase = note.deletingPathExtension()
-        let newBase = base(in: folder)
-        guard newBase.lastPathComponent != oldBase.lastPathComponent else {
-            appliedName = meetingName
-            writeNote()
-            return
-        }
-        let fm = FileManager.default
-        // On a case-insensitive disk, a change of upper/lower case only finds the
-        // same file under the new name: that's a rename, not a clash.
-        let newNote = newBase.appendingPathExtension("md")
-        if fm.fileExists(atPath: newNote.path), !Self.isSameFile(note, newNote) {
-            lastError = "A meeting named \"\(newBase.lastPathComponent)\" already exists in this folder."
-            return
-        }
-        var failed: String?
-        var noteMoved = false
-        for suffix in Self.companionSuffixes {
-            let from = folder.appendingPathComponent(oldBase.lastPathComponent + suffix)
-            let to = folder.appendingPathComponent(newBase.lastPathComponent + suffix)
-            guard fm.fileExists(atPath: from.path) else { continue }
-            do {
-                if Self.isSameFile(from, to) {
-                    // Via a temporary name; put it back if the second step fails.
-                    let step = folder.appendingPathComponent(".wingman-rename-\(UUID().uuidString)\(suffix)")
-                    try fm.moveItem(at: from, to: step)
-                    do {
-                        try fm.moveItem(at: step, to: to)
-                    } catch {
-                        try? fm.moveItem(at: step, to: from)
-                        throw error
-                    }
-                } else {
-                    try fm.moveItem(at: from, to: to)
-                }
-                if suffix == ".md" { noteMoved = true }
-                if themAudio == from { themAudio = to }
-                if meAudio == from { meAudio = to }
-            } catch {
-                failed = failed ?? "Couldn't rename \(from.lastPathComponent): \(error.localizedDescription)"
-            }
-        }
-        // The note itself couldn't move: keep pointing at it, under its old name.
-        if !noteMoved, fm.fileExists(atPath: note.path) {
-            lastError = failed
-            return
-        }
-        currentNote = newNote
-        appliedName = meetingName
-        lastError = failed
-        saveRecoveryRecord()
-        writeNote()
-    }
+    static let companionSuffixes = [".md", ".m4a", "-me.m4a", "-them.m4a", "-me.wav", "-them.wav", ".vtt", ".srt"]
 
     /// Whether two paths name the same file (e.g. only upper/lower case differs
     /// on a case-insensitive disk). False if either doesn't exist.
-    private static func isSameFile(_ a: URL, _ b: URL) -> Bool {
+    static func isSameFile(_ a: URL, _ b: URL) -> Bool {
         let key = URLResourceKey.fileResourceIdentifierKey
         // Fresh URL objects, so cached resource values can't answer for an old state.
         guard let idA = try? URL(fileURLWithPath: a.path).resourceValues(forKeys: [key]).fileResourceIdentifier,
@@ -1489,218 +1436,97 @@ final class Recorder {
 
     // MARK: - Speaker names
 
-    /// The labels in this transcript, in order of first appearance.
-    var speakerLabels: [String] {
-        var seen: [String] = []
-        for line in lines where line.isFinal && !seen.contains(line.label) { seen.append(line.label) }
-        return seen
-    }
-
-    /// Labels voices that match people named in earlier meetings: confident
-    /// matches by name, the rest as "Name?" for the user to confirm.
-    private func recognizePeople() {
-        guard recognizeVoices, !voiceprints.isEmpty, !voices.people.isEmpty else { return }
-        let invitees = (meeting?.attendees ?? []) + [meeting?.organizer].compactMap { $0 }
-        // Re-runs (e.g. after picking a calendar event) leave the user's own names alone.
-        let namedByUser = Set(speakerNames.keys).subtracting(recognized)
-        for label in recognized { speakerNames[label] = nil }
-        recognized = []
-        voiceGuesses = voiceGuesses.filter { namedByUser.contains($0.key) }
-        var known: [String] = [], unsure: [String] = []
-        for (label, match) in voices.match(voiceprints.filter { !namedByUser.contains($0.key) }, invitees: invitees) {
-            if match.confident {
-                speakerNames[label] = match.name
-                recognized.insert(label)
-                known.append(match.name)
-            } else {
-                voiceGuesses[label] = match.name
-                unsure.append(match.name)
-            }
-        }
-        var parts: [String] = []
-        if !known.isEmpty { parts.append("Recognized \(known.sorted().joined(separator: ", ")) from earlier meetings.") }
-        if !unsure.isEmpty { parts.append("Click \(unsure.sorted().map { "\($0)?" }.joined(separator: ", ")) to confirm.") }
-        if !parts.isEmpty { notice = parts.joined(separator: " ") }
-    }
-
     // MARK: - Calendar event
 
-    /// Attaches a calendar event to this meeting (or detaches it with nil):
-    /// its invitees become rename suggestions and recognition candidates, and
-    /// its details go in the note. The meeting name follows the event unless
-    /// the user typed their own. Before recording, it's used when recording starts.
-    func attach(_ new: MeetingInfo?) {
-        let oldTitle = meeting?.title
-        meeting = new
-        let typed = meetingName.trimmingCharacters(in: .whitespaces)
-        if typed.isEmpty || nameFromCalendar || typed == oldTitle {
-            meetingName = new?.title ?? ""
-            nameFromCalendar = new != nil
+    // MARK: Deleting voices
+
+    /// Who deleting these meetings' voices would change in People, for the confirmation.
+    func effectOfDeletingVoices(of meetings: Set<UUID>) -> (recalculated: [String], forgotten: [String]) {
+        voices.effectOfRemoving(meetings: meetings)
+    }
+
+    /// People who learned from these meetings but whose voice can't have that
+    /// taken out exactly: an older Wingman (0.8) rewrote their voice without
+    /// the record of which meeting each part came from. Forgetting them is
+    /// the only complete removal.
+    func untraceableLearning(in meetings: Set<UUID>) -> [String] {
+        let speakers = index.meetings.filter { meetings.contains($0.id) }.flatMap(\.speakers)
+        let lost = voices.untraceable(Set(speakers.compactMap(\.learned)))
+        return Array(Set(speakers.filter { $0.learned.map(lost.contains) ?? false }.compactMap(\.name))).sorted()
+    }
+
+    /// Delete Voices: the meetings' kept voices, and everything learned from them
+    /// (people are recalculated without them; someone learned only from them is
+    /// forgotten). The meetings are never searched for voices again; names stay.
+    @discardableResult
+    func deleteVoices(of meetings: Set<UUID>) -> Bool {
+        guard voices.removeVoices(fromMeetings: meetings) else { return false }
+        var ok = true
+        for id in meetings { ok = index.deleteVoices(of: id) && ok }
+        for meeting in self.meetings where meetings.contains(meeting.id) { meeting.forgetLearned() }
+        return ok
+    }
+
+    /// Delete All in Settings → People: every meeting's voices, as above, and
+    /// none kept or looked for in meetings from before now.
+    @discardableResult
+    func deleteAllMeetingVoices() -> Bool {
+        // Also what was learned from meetings no longer listed (their entry
+        // went with a note removed outside Wingman).
+        let learnedFrom = voices.people.flatMap { $0.contributions?.compactMap(\.meeting) ?? [] }
+        let all = Set(index.meetings.map(\.id)).union(learnedFrom)
+        guard voices.removeVoices(fromMeetings: all) else { return false }
+        meetings.forEach { $0.forgetLearned() }
+        return index.deleteAllVoices(because: .deleted)
+    }
+
+    /// Forget Everyone: all people, and all meetings' voices.
+    func forgetEveryone() {
+        voices.forgetEveryone()
+        guard voices.people.isEmpty else { return }
+        meetings.forEach { $0.forgetLearned() }
+        index.deleteAllVoices(because: .deleted)
+    }
+
+    /// At launch and then hourly: meeting voices past their 180 days are deleted,
+    /// old note backups go, and renames a quit interrupted are finished.
+    func tidyMeetingData() {
+        index.purgeExpired()
+        Task.detached(priority: .utility) { NoteFile.prune() }
+        let jobs = index.jobs
+        if !jobs.isEmpty {
+            Task {
+                for job in jobs {
+                    guard let key = index.meeting(id: job.meeting)?.key else {
+                        index.finish(job)
+                        continue
+                    }
+                    let url = Self.notesFolder.appendingPathComponent(key + ".md")
+                    guard let meeting = try? await PastMeeting.open(url, index: index, voices: voices,
+                                                                    recognize: { [weak self] in self?.recognizeVoices ?? false }) else { continue }
+                    await meeting.resume(job)
+                    Log.write("finished a speaker rename left by an earlier session")
+                }
+            }
         }
-        Log.write("calendar event \(new == nil ? "detached" : "picked") by user")
-        guard currentNote != nil else {
-            preselection = new.map { .event($0) } ?? .noEvent
-            return
+        guard tidyTimer == nil else { return }
+        tidyTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3600))
+                self?.index.purgeExpired()
+            }
         }
-        applyMeetingName()
-        recognizePeople()
-        writeNote()
     }
 
-    /// Invitees (with the organizer first) and whether each is already a speaker's name.
-    var invitees: [(name: String, matched: Bool)] {
-        guard let meeting else { return [] }
-        var names = meeting.attendees
-        if let organizer = meeting.organizer, !names.contains(organizer) { names.insert(organizer, at: 0) }
-        let used = Set(speakerNames.values.map { $0.lowercased() })
-        return names.map { ($0, used.contains($0.lowercased())) }
-    }
+    private var tidyTimer: Task<Void, Never>?
 
-    /// The voice-based guess for a label, if one is waiting for confirmation.
-    func guess(for label: String) -> String? {
-        speakerNames[label] == nil ? voiceGuesses[label] : nil
-    }
-
-    func isRecognized(_ label: String) -> Bool { recognized.contains(label) }
-
-    func displayName(_ line: TranscriptLine) -> String {
-        if let name = speakerNames[line.label] { return name }
-        if let guess = voiceGuesses[line.label] { return "\(guess)?" }
-        let mine = myName.trimmingCharacters(in: .whitespaces)
-        if line.speaker == .me, !mine.isEmpty { return mine }
-        return line.label
-    }
-
-    /// Names for exports: per-meeting renames, plus the default name for "Me".
-    private var exportNames: [String: String] {
-        var names = speakerNames
-        for (label, guess) in voiceGuesses where names[label] == nil { names[label] = "\(guess)?" }
-        let mine = myName.trimmingCharacters(in: .whitespaces)
-        if names[Speaker.me.rawValue] == nil, !mine.isEmpty { names[Speaker.me.rawValue] = mine }
-        return names
-    }
-
-    func rename(speaker label: String, to name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let new = trimmed.isEmpty || trimmed == label ? nil : trimmed
-        guard new != speakerNames[label] || voiceGuesses[label] != nil || recognized.contains(label) else { return }
-        speakerNames[label] = new
-        voiceGuesses[label] = nil
-        recognized.remove(label)
-        // A correction: forget what this voice taught Wingman under the old name.
-        if let undo = learned.removeValue(forKey: label) { voices.undo(undo) }
-        // Naming a remote voice teaches Wingman to recognize it next time.
-        if recognizeVoices, let name = new, let print = voiceprints[label] {
-            learned[label] = voices.learn(name, voiceprint: print)
-        }
-        writeNote()
-    }
-
-    /// Accepts a "Name?" guess, which also refines that person's voiceprint.
-    func confirmGuess(for label: String) {
-        guard let name = voiceGuesses[label] else { return }
-        rename(speaker: label, to: name)
-    }
-
-    private func audioURL(_ base: URL, _ suffix: String) -> URL {
+    static func audioURL(_ base: URL, _ suffix: String) -> URL {
         base.deletingLastPathComponent()
             .appendingPathComponent("\(base.lastPathComponent)-\(suffix).wav")
     }
 
-    /// Writes the note. A failure is shown in the window (with Save Note As…)
-    /// and clears `noteSaved`, so no notification or report claims it was saved.
-    @discardableResult
-    private func writeNote() -> Bool {
-        guard let currentNote, let text = noteText() else { return false }
-        // After the meeting the note is yours: an edit made in another app, or
-        // moving the note to the Trash, wins over a later change in Wingman.
-        if phase == .idle, let written = noteWrittenAt {
-            guard let modified = Self.modificationDate(currentNote) else {
-                notice = "The note was moved or deleted outside Wingman, so this change wasn't saved to it."
-                return false
-            }
-            guard modified == written else {
-                notice = "The note was edited outside Wingman, so this change wasn't saved to it (your edits are kept)."
-                return false
-            }
-        }
-        do {
-            try text.write(to: currentNote, atomically: true, encoding: .utf8)
-            noteWrittenAt = Self.modificationDate(currentNote)
-            noteSaved = true
-            noteSaveError = nil
-            return true
-        } catch {
-            Log.write("couldn't write the note: \(Log.describe(error))")
-            noteSaved = false
-            noteSaveError = "Wingman couldn't save the note (\(error.localizedDescription)). The transcript is still here: use Save Note As… to keep a copy."
-            return false
-        }
-    }
-
-    /// The note's Markdown, from the meeting in the window.
-    private func noteText() -> String? {
-        guard let startedAt else { return nil }
-        let minutes = Int((endedAt ?? Date()).timeIntervalSince(startedAt) / 60)
-        let title = meetingName.trimmingCharacters(in: .whitespaces).isEmpty ? "Meeting" : meetingName
-        var text = """
-        # \(title)
-
-        **Date:** \(startedAt.formatted(date: .abbreviated, time: .shortened))  
-        **Duration:** \(minutes) min
-
-        """
-        if let sourceFile { text += "\n**Transcribed from:** \(sourceFile)  \n" }
-        if let meeting {
-            let time = "\(meeting.start.formatted(date: .omitted, time: .shortened))–\(meeting.end.formatted(date: .omitted, time: .shortened))"
-            text += "\n**Calendar:** \(meeting.title.isEmpty ? "Untitled event" : meeting.title), \(time)  \n"
-            if let organizer = meeting.organizer { text += "**Organizer:** \(organizer)  \n" }
-            if !meeting.attendees.isEmpty { text += "**Invited:** \(meeting.attendees.joined(separator: ", "))  \n" }
-            if let link = meeting.link { text += "**Link:** \(link.absoluteString)  \n" }
-        }
-        text += "\n## Transcript\n"
-        for line in lines where line.isFinal {
-            let flag = line.incomplete ? " *(incomplete)*" : line.possibleEcho ? " *(possible echo)*" : line.isUnclear ? " *(unclear)*" : ""
-            text += "\n[\(Self.timestamp(line.start))] **\(displayName(line)):** \(line.text)\(flag)\n"
-        }
-        let final = lines.filter(\.isFinal)
-        var marks: [String] = []
-        if final.contains(where: \.isUnclear) { marks.append("*(unclear)* marks lines the speech model wasn't confident about; check them against the audio.") }
-        if final.contains(where: \.incomplete) { marks.append("*(incomplete)* marks lines the speech model failed on; the text is what it had heard so far.") }
-        if final.contains(where: \.possibleEcho) { marks.append("*(possible echo)* marks your lines that may be the call coming back through your speakers.") }
-        if !marks.isEmpty { text += "\n---\n" + marks.joined(separator: "  \n") + "\n" }
-        return text
-    }
-
-    /// Save Note As…: the note somewhere else, when it couldn't be saved where it belongs.
-    func saveNoteCopy(to url: URL) throws {
-        guard let text = noteText() else { return }
-        try text.write(to: url, atomically: true, encoding: .utf8)
-        notice = "Saved a copy of the note as \(url.lastPathComponent)."
-        Log.write("note saved elsewhere (user choice)")
-    }
-
-    /// Something a stream couldn't fix by itself: say so once per kind and track.
-    private func streamProblem(_ speaker: Speaker, _ problem: StreamProblem) {
-        guard phase != .idle else { return }
-        let side = speaker == .me ? "your microphone's" : "the call's"
-        switch problem {
-        case .audioFile(let what):
-            guard reportedProblems.insert("audio \(speaker)").inserted else { return }
-            Log.write("couldn't save the \(speaker == .me ? "microphone" : "call") audio: \(what)")
-            warning = "Wingman couldn't save \(side) audio, so this meeting's audio may be missing or incomplete (is the disk full?). The transcript is still being saved."
-        case .recognition:
-            guard reportedProblems.insert("recognition").inserted else { return }
-            warning = "Wingman's speech recognition failed on some lines; what it had heard of them is kept, marked (incomplete)."
-        case .voiceDetection:
-            guard reportedProblems.insert("detection \(speaker)").inserted else { return }
-            Log.write("voice detection keeps failing (\(speaker == .me ? "microphone" : "call"))")
-            warning = "Wingman's voice detection isn't working for \(side) audio, so some speech may be missing from the transcript (the audio is still saved)."
-        }
-    }
-
     /// Read fresh each time (URL resource values are cached per URL instance).
-    private static func modificationDate(_ url: URL) -> Date? {
+    static func modificationDate(_ url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 

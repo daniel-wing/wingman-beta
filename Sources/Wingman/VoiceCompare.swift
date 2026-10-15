@@ -35,7 +35,7 @@ enum VoiceCompare {
             defer { try? FileManager.default.removeItem(at: file) }
             let library = VoiceLibrary(file: file)
             for (name, id) in zip(names, orderA) {
-                if let print = a.voiceprints[id] { library.learn(name, voiceprint: print) }
+                if let print = a.voiceprints[id] { library.learn(name, voiceprint: print, meeting: UUID(), speaker: UUID(), asNewPerson: true) }
             }
             print("\nLearned from A: \(library.people.map(\.name).joined(separator: ", "))")
             var voicesB: [String: [Float]] = [:]

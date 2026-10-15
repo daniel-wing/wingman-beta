@@ -110,6 +110,10 @@ final class CallDetector {
     private var task: Task<Void, Never>?
     private var tracker = CallTracker()
     private var sequence = 0
+    /// Since when polls couldn't tell whether a call is still going.
+    var uncertainSince: Date? { tracker.uncertainSince }
+    /// Called after each poll, so the watcher can warn about uncertainty.
+    var onPoll: (() -> Void)?
 
     init(inspect: Inspector? = nil, onEvent: @escaping (Event) -> Void) {
         self.inspect = inspect
@@ -140,7 +144,9 @@ final class CallDetector {
     private func poll() async {
         var observation = MicObservation()
         var browserPIDs: [String: (pid: pid_t, family: String)] = [:]
-        for process in Self.microphoneProcesses() {
+        let reading = Self.reading(kAudioProcessPropertyIsRunningInput)
+        observation.complete = reading.complete
+        for process in reading.processes {
             guard let app = CallApp.matching(bundleID: process.bundleID) else { continue }
             guard app == .browser, let family = CallApp.browserFamily(of: process.bundleID) else {
                 observation.apps.insert(app)
@@ -158,6 +164,7 @@ final class CallDetector {
         }
         sequence += 1
         for event in tracker.update(observation, at: Date(), sequence: sequence) { onEvent(event) }
+        onPoll?()
     }
 
     /// The browser a capturing process belongs to: Chrome records in a helper whose
@@ -194,26 +201,41 @@ final class CallDetector {
     }
 
     private nonisolated static func processes(running selector: AudioObjectPropertySelector) -> [AudioProcess] {
+        reading(selector).processes
+    }
+
+    /// The processes using a device, and whether Core Audio answered fully: a
+    /// list it couldn't give, or a process it couldn't read (other than one that
+    /// just quit), makes the reading incomplete — "nobody" isn't known then.
+    nonisolated static func reading(_ selector: AudioObjectPropertySelector) -> (processes: [AudioProcess], complete: Bool) {
         let system = AudioObjectID(kAudioObjectSystemObject)
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr, size > 0 else { return [] }
+        guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr else { return ([], false) }
+        guard size > 0 else { return ([], true) }
         var processes = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &processes) == noErr else { return [] }
+        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &processes) == noErr else { return ([], false) }
 
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        return processes.compactMap { process in
+        var complete = true
+        let found: [AudioProcess] = processes.compactMap { process in
             var running: UInt32 = 0
             var runningSize = UInt32(MemoryLayout<UInt32>.size)
             var runningAddress = AudioObjectPropertyAddress(
                 mSelector: selector,
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain)
-            guard AudioObjectGetPropertyData(process, &runningAddress, 0, nil, &runningSize, &running) == noErr,
-                  running != 0 else { return nil }
+            let status = AudioObjectGetPropertyData(process, &runningAddress, 0, nil, &runningSize, &running)
+            // A process that quit since the list was read is simply gone.
+            if status == kAudioHardwareBadObjectError { return nil }
+            guard status == noErr else {
+                complete = false
+                return nil
+            }
+            guard running != 0 else { return nil }
 
             var pid: pid_t = 0
             var pidSize = UInt32(MemoryLayout<pid_t>.size)
@@ -231,5 +253,6 @@ final class CallDetector {
                   let bundle else { return AudioProcess(bundleID: "pid:\(pid)", pid: pid) }
             return AudioProcess(bundleID: bundle.takeRetainedValue() as String, pid: pid)
         }
+        return (found, complete)
     }
 }

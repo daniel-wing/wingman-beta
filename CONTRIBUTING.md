@@ -21,6 +21,9 @@ These are promises to the people who use Wingman; changes need to keep them:
   Chrome's tab strip; it never clicks, types or switches anything on in another app.
 - **When unsure, keep the user's words:** a line that might be an echo is kept, marked,
   not deleted; a line the speech engine failed on is kept, marked.
+- **Notes are the user's files.** Wingman changes a saved note only to rename a speaker
+  (`NoteRewriter`: only the speaker field of transcript lines, verified row by row), after
+  a backup, inside a coordinated write (`NoteFile`). Notes are never renamed or deleted.
 - **Never claim what didn't happen:** "saved", "forgotten", "discarded" only after the
   disk operation worked; errors are shown, and logged as domain and code only.
 - The app's text is in English, short and plain.
@@ -40,6 +43,11 @@ open /Applications/Wingman.app
 - Your build is signed ad hoc with a bundle-ID requirement, so macOS keeps its
   permissions across rebuilds. To macOS it's a different app from the official
   release, so you'll grant the permissions again the first time.
+- For a steadier signature, make your own certificate: Keychain Access → Certificate
+  Assistant → Create a Certificate…, name it (say, "Wingman Dev"), Identity Type
+  *Self-Signed Root*, Certificate Type *Code Signing*. Then build with
+  `SIGN_IDENTITY="Wingman Dev" ./install.sh`. A certificate named exactly "Wingman" is
+  picked up without it.
 - **Builds from source don't update themselves** (`install.sh` clears the update
   key), so the next official release never replaces your changes.
 - `RELEASE=1` leaves out the diagnostic tools; `APP_STORE=1` builds the App Store
@@ -51,7 +59,9 @@ open /Applications/Wingman.app
 swift test --disable-keychain
 ```
 
-The tests cover pure logic (Swift Testing). With only the Command Line Tools
+The tests cover pure logic and file handling in temporary folders (Swift Testing).
+GitHub Actions runs the build, the tests and the App Store variant on every push and
+pull request (`.github/workflows/build.yml`, macOS 26). With only the Command Line Tools
 installed, SwiftPM can't find the Testing framework on its own; add:
 
 ```bash
@@ -67,7 +77,12 @@ swift test --disable-keychain -Xswiftc -F -Xswiftc $F -Xlinker -F -Xlinker $F \
 | Entry | `main.swift` | Without arguments: the app. With a tool name: a diagnostic tool (below); left out with `NO_DIAGNOSTICS`. |
 | App and UI | `UI/WingmanApp.swift` | Scenes (menu bar, window, welcome guide, settings) and `AppDelegate`, which owns the recorder, call watcher, permissions, shortcuts, mute follower, updater and problem reporter. |
 | | `UI/TranscriptView.swift`, `UI/SettingsView.swift`, `UI/WelcomeView.swift`, `UI/Permissions.swift`, `UI/Feedback.swift`, … | Main window, Settings, first-run guide, permission states, feedback and "Report a Problem with a Call". |
-| Core | `Recorder.swift` | Idle → preparing → recording → finishing. Mic and system-audio streams, mute, device changes, the after-meeting pipeline (language review → speaker separation → recognition → combined audio), notes and file names. |
+| Past meetings | `PastMeeting.swift`, `UI/MeetingsView.swift` | Naming speakers in saved notes: a journaled rename (backup → note → subtitles → index → voice), the Meetings window. |
+| | `Support/MeetingNote.swift`, `Support/SubtitleRewriter.swift`, `Support/NoteFile.swift` | Reading a note back byte-exactly; renaming a speaker and proving nothing else changed; coordinated, verified writes and note backups. |
+| | `Support/MeetingIndex.swift`, `Transcription/VoiceRecovery.swift` | Speaker ids per meeting, meeting voices kept 180 days, rename jobs; finding voices in older meetings' audio (in a child process, offered with a sample). |
+| | `Support/NoteNaming.swift`, `UI/TranscriptList.swift` | `2026-10-07_01_Name` file names; the shared transcript list with Find, text size and Name Them. |
+| Core | `Recorder.swift` | Capture: idle → preparing → recording. Mic and system-audio streams (each track written by a `TrackWriter` through a `WriterSlot`), mute, device changes, splitting a recording when a new call starts, file transcription. Keeps the open meetings. |
+| | `Meeting.swift` | One meeting: transcript lines, speaker names, note, tracks, and the after-meeting pipeline (language review → speaker separation → recognition → combined audio), run in the background. Each has its own window. |
 | Audio | `Audio/` | Plain AVAudioEngine mic (no voice processing: it silenced Teams), Core Audio process tap for the call, device-change handling with time alignment, resampling, reading audio/video files. |
 | Transcription | `Transcription/` | Parakeet Ultra via FluidAudio (live), Silero voice detection, Whisper large-v3 turbo language review after the meeting, speaker separation and voiceprints. |
 | Calls | `Detection/CallDetector.swift`, `CallTracker.swift`, `CallWatcher.swift` | Which apps hold the mic (Core Audio process objects) → call sessions (3 s to start, 6 s to end) → record, ask or ignore per app, per session. `CallReport.swift` keeps each call's steps for problem reports. |
@@ -109,6 +124,13 @@ scripts/tool.sh recordtest 30
 
 # Preview the "Report a problem with this call" dialog with a made-up call
 scripts/tool.sh reportdialog
+
+# Check that every note can be read back exactly and renamed safely (read-only)
+scripts/tool.sh notecheck ~/Meeting\ Notes
+
+# What the voice search would find in older meetings, with its numbers (read-only;
+# --samples writes each offered voice's sample to a temporary folder)
+scripts/tool.sh voicerecover ~/Meeting\ Notes/2026-10-01/14-30\ Sync.md --samples
 ```
 
 Tools that only read files run straight from the build:
@@ -151,9 +173,12 @@ Tools that only read files run straight from the build:
 
 Official builds are made by the maintainer with `scripts/make-release.sh`. It runs the
 tests, builds from a clean copy of the last commit with the exact pinned dependency
-versions, signs with the project's certificate (so macOS keeps users' permissions across
-updates) and the update key that installed copies trust, and checks the release, the
-public tree and its history for identifying details (`scripts/check-public.sh`).
+versions, signs with the maintainer's Apple Developer ID (hardened runtime, with
+`Wingman.entitlements` declaring the microphone and calendar), has Apple notarize it
+(`scripts/notarize.sh`), checks that Gatekeeper accepts the exact zip, signs the update
+with the key that installed copies trust, and checks the release, the public tree and its
+history for identifying details (`scripts/check-public.sh`). `DEVELOPER_ID=1 ./install.sh`
+does the signing part on its own, for a maintainer with the certificate.
 
 ## Ideas on the list
 

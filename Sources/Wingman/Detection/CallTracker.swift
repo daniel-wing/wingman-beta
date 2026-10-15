@@ -22,6 +22,10 @@ struct CallSession: Equatable, Sendable, Identifiable {
 struct MicObservation: Sendable {
     /// Teams and Zoom (apps recognized by their own process).
     var apps: Set<CallApp> = []
+    /// False when Core Audio couldn't say who holds the mic (the list, or a
+    /// process in it, couldn't be read): an app missing from such a poll may
+    /// still be in its call, so it proves nothing.
+    var complete = true
     /// Each browser holding the mic, by "<bundle prefix>|<pid>", with what its
     /// windows show.
     var browsers: [String: BrowserScan] = [:]
@@ -47,6 +51,9 @@ enum BrowserScan: Equatable, Sendable {
 ///   different code is a different meeting;
 /// - "gone" for a meeting only counts in complete scans; partial or unavailable
 ///   ones neither end it nor run its clock — only the browser releasing the mic does;
+/// - a poll that couldn't read who holds the mic (`complete == false`) neither
+///   ends a call nor runs its clock: the call is *uncertain*, and once readings
+///   work again a missing app's 6 s start from then, not from before;
 /// - evidence can improve within a session (weak → strong) and is never lowered;
 /// - a browser's own session (a plain browser call) only starts when no meeting is
 ///   seen in it, and not at all after a Meet call ended while the browser kept the
@@ -67,6 +74,8 @@ struct CallTracker {
         var firstSeen: Date?
         var lastSeen: Date?
         var session: CallSession?
+        /// Missing from polls that couldn't tell.
+        var uncertain = false
     }
 
     private struct MeetingState {
@@ -85,12 +94,17 @@ struct CallTracker {
         /// leftover as a browser call until it lets go.
         var holdBackPlain = false
         var meetings: [String: MeetingState] = [:]
+        /// Missing from polls that couldn't tell.
+        var uncertain = false
     }
 
     private var apps: [CallApp: AppState] = [:]
     private var browsers: [String: BrowserState] = [:]
     private var lastSequence = Int.min
     private let makeID: () -> UUID
+    /// Since when polls haven't been able to tell whether calls are still going
+    /// (nil while they can, or when no call is going).
+    private(set) var uncertainSince: Date?
 
     init(makeID: @escaping () -> UUID = UUID.init) {
         self.makeID = makeID
@@ -112,11 +126,28 @@ struct CallTracker {
         guard sequence > lastSequence else { return [] }
         lastSequence = sequence
         var events: [Event] = []
-        updateApps(observation.apps, now: now, events: &events)
+        if observation.complete {
+            uncertainSince = nil
+        } else if !sessions.isEmpty, uncertainSince == nil {
+            uncertainSince = now
+        }
+        updateApps(observation.apps, complete: observation.complete, now: now, events: &events)
         for (key, scan) in observation.browsers {
             updateBrowser(key, scan: scan, now: now, events: &events)
         }
-        for (key, state) in browsers where observation.browsers[key] == nil {
+        for (key, var state) in browsers where observation.browsers[key] == nil {
+            // Can't tell: its sessions stay, and its clock starts again later.
+            guard observation.complete else {
+                state.uncertain = true
+                browsers[key] = state
+                continue
+            }
+            if state.uncertain {
+                // Readings work again: its 6 s count from now.
+                state.uncertain = false
+                state.lastSeen = now
+                browsers[key] = state
+            }
             let sessions = [state.plainSession].compactMap({ $0 }) + state.meetings.values.compactMap(\.session)
             // Gone before anything started: its 3 s start over, like an app's.
             if sessions.isEmpty {
@@ -129,9 +160,20 @@ struct CallTracker {
         return events
     }
 
-    private mutating func updateApps(_ present: Set<CallApp>, now: Date, events: inout [Event]) {
+    private mutating func updateApps(_ present: Set<CallApp>, complete: Bool, now: Date, events: inout [Event]) {
         for app in CallApp.allCases where app != .browser && app != .meet {
             var state = apps[app] ?? AppState()
+            if !present.contains(app), !complete {
+                // Unknown: no clock runs, either way.
+                if state.session != nil { state.uncertain = true }
+                apps[app] = state
+                continue
+            }
+            if state.uncertain {
+                // Readings work again: a missing app's 6 s count from now.
+                state.uncertain = false
+                state.lastSeen = now
+            }
             if present.contains(app) {
                 state.lastSeen = now
                 if state.firstSeen == nil { state.firstSeen = now }

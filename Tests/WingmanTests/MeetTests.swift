@@ -160,13 +160,13 @@ import Testing
                 return UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", count))!
             })
         }
-        mutating func poll(_ t: Double, apps: Set<CallApp> = [], _ browsers: [String: BrowserScan] = [:]) -> [CallTracker.Event] {
+        mutating func poll(_ t: Double, apps: Set<CallApp> = [], _ browsers: [String: BrowserScan] = [:], complete: Bool = true) -> [CallTracker.Event] {
             sequence += 1
-            return tracker.update(MicObservation(apps: apps, browsers: browsers), at: Date(timeIntervalSince1970: t), sequence: sequence)
+            return tracker.update(MicObservation(apps: apps, complete: complete, browsers: browsers), at: Date(timeIntervalSince1970: t), sequence: sequence)
         }
         /// Polls once a second from `from` up to `to`, collecting events.
-        mutating func run(_ from: Int, _ to: Int, apps: Set<CallApp> = [], _ browsers: [String: BrowserScan] = [:]) -> [CallTracker.Event] {
-            (from...to).flatMap { poll(Double($0), apps: apps, browsers) }
+        mutating func run(_ from: Int, _ to: Int, apps: Set<CallApp> = [], _ browsers: [String: BrowserScan] = [:], complete: Bool = true) -> [CallTracker.Event] {
+            (from...to).flatMap { poll(Double($0), apps: apps, browsers, complete: complete) }
         }
     }
 
@@ -191,6 +191,37 @@ import Testing
         #expect(teams.map(\.app) == [.teams])
         #expect(ended(d.run(4, 8)).isEmpty)
         #expect(ended(d.run(9, 9)).map(\.id) == teams.map(\.id))
+    }
+
+    @Test func readingsThatCantTellNeverEndACall() {
+        var d = Driver()
+        let teams = started(d.run(0, 3, apps: [.teams]))
+        // Core Audio can't say who holds the mic for a long time: the call stays.
+        #expect(ended(d.run(4, 300, complete: false)).isEmpty)
+        #expect(d.tracker.uncertainSince == Date(timeIntervalSince1970: 4))
+        #expect(d.tracker.isActive(teams[0].id))
+        // Readings work again and Teams is gone: 6 s from now, not from before.
+        #expect(ended(d.run(301, 306)).isEmpty)
+        #expect(d.tracker.uncertainSince == nil)
+        #expect(ended(d.run(307, 307)).map(\.id) == teams.map(\.id))
+    }
+
+    @Test func aCallSeenAgainAfterUncertaintyGoesOn() {
+        var d = Driver()
+        let teams = started(d.run(0, 3, apps: [.teams]))
+        _ = d.run(4, 60, complete: false)
+        #expect(ended(d.run(61, 80, apps: [.teams])).isEmpty)
+        #expect(d.tracker.isActive(teams[0].id))
+        #expect(d.tracker.uncertainSince == nil)
+    }
+
+    @Test func aBrowserCallSurvivesReadingsThatCantTell() {
+        var d = Driver()
+        let call = started(d.run(0, 9, [chrome: .complete([meet("aaa-aaaa-aaa")])]))
+        #expect(ended(d.run(10, 100, complete: false)).isEmpty)
+        #expect(d.tracker.isActive(call[0].id))
+        #expect(ended(d.run(101, 106)).isEmpty)
+        #expect(ended(d.run(107, 108)).map(\.id) == call.map(\.id))
     }
 
     @Test func meetThenVoiceTypingThenMeetEndsThenAnotherMeet() {

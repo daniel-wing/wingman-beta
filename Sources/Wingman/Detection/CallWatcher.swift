@@ -35,6 +35,11 @@ final class CallWatcher {
     private let recorder: Recorder
     private let notifier: Notifier
     private var detector: CallDetector?
+    /// Call detection hasn't been able to tell for a while whether the call is
+    /// still going: the recording goes on until it can, or until you stop it.
+    private(set) var detectionUncertain = false
+    private var uncertaintyNotified = false
+    private var nextUncertaintyLog: TimeInterval = 0
     /// Opens the Wingman window (set by the app, which owns window handling).
     var showWindow: (() -> Void)?
 
@@ -68,8 +73,34 @@ final class CallWatcher {
             await MeetInspector.shared.scan(browserPID: pid, family: family)
         }) { [weak self] event in self?.handle(event) }
         #endif
+        detector.onPoll = { [weak self, weak detector] in self?.checkUncertainty(since: detector?.uncertainSince) }
         detector.start()
         self.detector = detector
+    }
+
+    /// Detection that can't read isn't "the call ended": nothing is stopped, but
+    /// after 10 s the window and menu bar say so, after 60 s once in a
+    /// notification, and the log notes it (at once, then 10 s, 1 min, 10 min).
+    private func checkUncertainty(since: Date?, now: Date = Date()) {
+        guard let since, recorder.isRecording else {
+            if detectionUncertain || nextUncertaintyLog > 0 { Log.write("call detection can read again") }
+            detectionUncertain = false
+            uncertaintyNotified = false
+            nextUncertaintyLog = 0
+            return
+        }
+        let elapsed = now.timeIntervalSince(since)
+        if elapsed >= nextUncertaintyLog {
+            Log.write("call detection can't tell whether the call is still going (\(Int(elapsed)) s); still recording")
+            nextUncertaintyLog = [10, 60, 600].first { $0 > elapsed } ?? (elapsed + 600)
+        }
+        detectionUncertain = elapsed >= 10
+        if elapsed >= 60, !uncertaintyNotified {
+            uncertaintyNotified = true
+            notifier.warn("Wingman can't tell if the call is still going",
+                          "It keeps recording until you stop it, so nothing is lost.")
+            if let id = recordingReport { note(id, "Call detection couldn't tell whether the call was still going") }
+        }
     }
 
     func policy(for app: CallApp) -> AutoRecordPolicy { policies[app] ?? .ask }
@@ -222,12 +253,6 @@ final class CallWatcher {
         if old == .recording, let id = recordingReport, report(id)?.ended == nil {
             note(id, "Recording stopped while the call was still going")
         }
-        if case .finishing = old, new == .idle, let id = recordingReport {
-            recordingReport = nil
-            note(id, recorder.noteSaved ? "Note saved" : "The note couldn't be saved")
-            if let warning = recorder.warning { note(id, "Warning shown: \(Log.redacted(warning))") }
-            if let i = reports.firstIndex(where: { $0.id == id }), recorder.noteSaved { reports[i].note = recorder.currentNote }
-        }
         switch new {
         case .recording:
             // The session a recording is for is set just after this; look then.
@@ -329,7 +354,7 @@ final class CallWatcher {
         recordingReport = session.id
         note(session.id, "Recording started", outcome: .recorded)
         if recorder.useCalendar {
-            note(session.id, recorder.meeting == nil ? "No calendar event found, so the note is named by time" : "Named from a calendar event")
+            note(session.id, recorder.current?.meeting == nil ? "No calendar event found, so the note has no meeting name" : "Named from a calendar event")
         }
         // The call may have ended while the speech model was loading.
         if detector?.isActive(session) == false {
@@ -338,8 +363,10 @@ final class CallWatcher {
             await stopRecording()
             return
         }
-        let name = recorder.meetingName.trimmingCharacters(in: .whitespaces)
-        notifier.announceRecording(session.app, meeting: name.isEmpty ? nil : name, recording: recorder.recordingID)
+        let name = (recorder.current?.meetingName ?? "").trimmingCharacters(in: .whitespaces)
+        if let recording = recorder.recordingID {
+            notifier.announceRecording(session.app, meeting: name.isEmpty ? nil : name, recording: recording)
+        }
     }
 
     /// Stops the recording, however it was asked for — the call ending, a
@@ -348,11 +375,33 @@ final class CallWatcher {
     func stopRecording() async {
         guard recorder.isRecording else { return }
         notifier.withdrawRecording()
+        recordingReport = nil
+        // The meeting finishes in the background; `announceDone` follows when it's done.
         await recorder.stop()
-        // Read right away: a call waiting to be recorded may start next and clear the warning.
-        guard let note = recorder.currentNote else { return }
-        if recorder.noteSaved {
-            notifier.announceSaved(note.deletingPathExtension().lastPathComponent, warning: recorder.warning)
+    }
+
+    /// The recording was split for a new call in the same app: the call's report says so.
+    func noteSplit(_ meeting: Meeting) {
+        if let id = recordingReport { note(id, "A new call started in the same app; Wingman started a new note") }
+        // The recording notification's buttons act on the new note now.
+        let name = meeting.meetingName.trimmingCharacters(in: .whitespaces)
+        notifier.announceRecording(meeting.callApp, meeting: name.isEmpty ? nil : name, recording: meeting.recordingID)
+    }
+
+    /// A meeting finished: its report says whether the note was saved, and a
+    /// notification says so (with how many speakers are left to name).
+    func announceDone(_ meeting: Meeting, report: UUID?) {
+        if let report {
+            note(report, meeting.noteSaved ? "Note saved" : "The note couldn't be saved")
+            if let warning = meeting.warning { note(report, "Warning shown: \(Log.redacted(warning))") }
+            if let i = reports.firstIndex(where: { $0.id == report }), meeting.noteSaved { reports[i].note = meeting.currentNote }
+        }
+        guard let note = meeting.currentNote else { return }
+        if meeting.noteSaved {
+            let name = meeting.meetingName.trimmingCharacters(in: .whitespaces)
+            let rows = meeting.lines.map { TranscriptRow($0, meeting: meeting) }
+            notifier.announceSaved(name.isEmpty ? "Meeting" : name, toName: TranscriptView.tally(rows).toName.count,
+                                   note: note, warning: meeting.warning)
         } else {
             notifier.announceNotSaved()
         }

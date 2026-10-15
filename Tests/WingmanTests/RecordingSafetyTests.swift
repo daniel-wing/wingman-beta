@@ -206,3 +206,35 @@ final class Counter: @unchecked Sendable {
         #expect(times == [5, 10, 30, 60, 120, 180])
     }
 }
+
+@Suite struct LeftoverScratchTests {
+    /// Recovery runs in the background: a meeting recorded meanwhile has its
+    /// scratch tracks and record in the same folder, and must keep them.
+    @Test func onlyAnEarlierSessionsUnusedFilesGo() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("wingman-scratch-test-\(UUID().uuidString)")
+        let scratch = root.appendingPathComponent("Recording")
+        let temporary = root.appendingPathComponent("tmp")
+        try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+        try fm.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let launched = Date()
+        let earlier = launched.addingTimeInterval(-600)
+        func file(_ folder: URL, _ name: String, modified: Date) throws -> URL {
+            let url = folder.appendingPathComponent(name)
+            try Data("x".utf8).write(to: url)
+            try fm.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+            return url
+        }
+        let oldTrack = try file(scratch, "wingman-a-me.wav", modified: earlier)
+        let oldRecord = try file(scratch, "recording-a.json", modified: earlier)
+        let oldInUse = try file(scratch, "wingman-b-them.wav", modified: earlier)
+        _ = try file(scratch, "wingman-c-me.wav", modified: launched.addingTimeInterval(5))
+        _ = try file(scratch, "recording-c.json", modified: launched.addingTimeInterval(5))
+        let oldTemp = try file(temporary, "wingman-import-x.wav", modified: earlier)
+        _ = try file(temporary, "someone-else.wav", modified: earlier)
+        let found = Recorder.leftoverScratch(in: scratch, temporary: temporary, olderThan: launched,
+                                             inUse: [oldInUse.standardizedFileURL])
+        #expect(Set(found.map(\.lastPathComponent)) == Set([oldTrack, oldRecord, oldTemp].map(\.lastPathComponent)))
+    }
+}

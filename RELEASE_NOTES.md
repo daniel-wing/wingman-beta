@@ -1,5 +1,55 @@
 # Release notes
 
+## 0.9.0 — name speakers after the meeting
+
+- **Signed and notarized by Apple.** Wingman now carries an Apple Developer ID and is
+  checked by Apple, so installing it no longer needs *Open Anyway*. Because the signature
+  changed, macOS asks **once** more for the permissions you gave 0.8: Wingman opens
+  **Allow Wingman Again** with each one. For Accessibility, System Settings may still show
+  the old Wingman switched on: select it, click −, then click Allow in Wingman. Until
+  Accessibility is allowed again, Wingman can't follow your Teams/Zoom mute or split
+  back-to-back calls, and its menu says so.
+- **Back-to-back calls get their own notes.** When Teams or Zoom moves straight on to
+  the next call, Wingman starts a new note at that moment, with no gap in the audio, and
+  says so; **Join with Previous** undoes it for a minute. Before, both calls ended up in
+  one note.
+- **A window for each call.** Each call opens in its own window and keeps it, and the
+  previous call finishes in the background while the next one records — no more waiting
+  for "Saving audio…" before a new call can be recorded.
+- **Delete Meeting…** after a call (in its window, or in Meetings): its note, audio and
+  subtitles go to the Trash, and the voices learned from it are forgotten — for tests and
+  calls you don't need.
+- **Name speakers later.** The new **Meetings** window (menu bar → *Meetings…*) lists the
+  last two weeks with how many speakers each has left to name, and works while the next
+  call records. Naming changes only the speakers' names in the note and its subtitles;
+  a copy of the note is kept for 30 days first. *Open…* reaches older notes.
+- **Voices for later.** With *Recognize people* on, Wingman keeps each meeting's unnamed
+  voices for 180 days so naming them later still teaches Wingman their voice. Delete them
+  per meeting or all at once; turning *Recognize people* off deletes them all.
+- **Meetings from before 0.9:** Wingman looks for the voices in the kept call audio and
+  offers to learn the ones it's sure about — play a sample, then *Learn*. Nothing is
+  learned without you.
+- **Who's left to name:** "2 speakers to name · 1 to confirm" with **Name Them**, which
+  walks you through them. The *Meeting saved* notification says it too, and opens the
+  meeting.
+- **Find** (⌘F, ⌘G): find a phrase ignoring capitals, accents and punctuation; if the
+  phrase isn't there, the lines with all of its words, in any order.
+- **Text size:** ⌘+ (or ⌘=) / ⌘− / ⌘0, or *Text Size* in the toolbar; remembered.
+- **Open Wingman at login** (Settings), so calls are noticed without opening it first.
+- **Meetings** from the Dock icon's menu too, and a note dropped onto the Meetings window
+  opens there.
+- **Clearer file names:** `2026-10-07_01_Weekly sync.md` — the day and the meeting's
+  number that day. Older notes keep their names.
+- **Two people with the same name** aren't mixed up: a voice that doesn't sound like the
+  person Wingman knows by that name isn't learned, and can be learned as a different one.
+- A reply that adds a "not" to what was said (*"We should not deploy"*) is no longer marked
+  as a possible echo. The live transcript only follows new lines when you're at the
+  bottom (*Jump to Latest* otherwise). If call detection can't tell whether a call is
+  still going, Wingman keeps recording and says so instead of stopping. Only one copy of
+  Wingman runs at a time. A meeting's *Duration* now ends when it stopped recording.
+- **Going back to 0.8.2** keeps which meeting taught which voice, so *Delete Voices* still
+  works exactly after you return to 0.9.
+
 ## 0.8.2 — a frozen window no longer costs a recording
 
 A fix for a tester's call: the Wingman window froze while it was being resized, and the

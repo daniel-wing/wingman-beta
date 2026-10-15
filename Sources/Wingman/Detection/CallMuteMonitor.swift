@@ -85,6 +85,18 @@ final class CallMuteMonitor {
     // MARK: - Loop
 
     private func tick() async -> Duration {
+        // Not following the mute, but recording a Teams/Zoom call: still watch
+        // its call window, so a new call right after this one gets its own note.
+        if !enabled, recorder.isRecording, AXIsProcessTrusted(), let app = callApp() {
+            if app != target {
+                target = app
+                await probe.reset()
+            }
+            _ = await probe.read(app)
+            if let new = await probe.takeNewCall() { recorder.split(reason: .newCallWindow, force: new.titleChanged) }
+            settle(.off, problem: nil)
+            return .seconds(2)
+        }
         guard enabled, recorder.isRecording else {
             settle(enabled ? .waitingForCall : .off, problem: nil)
             return .seconds(1)
@@ -114,7 +126,9 @@ final class CallMuteMonitor {
             recorder.stopFollowingCallMute(keepOverride: false)
         }
 
-        switch await probe.read(app) {
+        let reading = await probe.read(app)
+        if let new = await probe.takeNewCall() { recorder.split(reason: .newCallWindow, force: new.titleChanged) }
+        switch reading {
         case .state(let muted):
             misses = 0
             foundInCall = true
@@ -216,13 +230,32 @@ actor AXProbe {
     }
 
     private var control: AXUIElement?
+    /// The window the control was last found in: the call's window, and its title.
+    private var callWindow: AXUIElement?
+    private var callTitle: String?
+    /// The control turned up in a different window after the previous call
+    /// window closed: Teams or Zoom moved on to a new call (see `takeNewCall`).
+    private var newCall: NewCall?
+    struct NewCall: Equatable {
+        /// The new window's title differs from the previous one's (another meeting).
+        let titleChanged: Bool
+    }
     private var pid: pid_t = 0
     private var triedWebAccessibility = false
     private var timeoutSet = false
 
     func reset() {
         control = nil
+        callWindow = nil
+        callTitle = nil
+        newCall = nil
         triedWebAccessibility = false
+    }
+
+    /// A new call window that appeared since the last time this was asked.
+    func takeNewCall() -> NewCall? {
+        defer { newCall = nil }
+        return newCall
     }
 
     func read(_ app: CallApp) -> Reading {
@@ -272,6 +305,24 @@ actor AXProbe {
         guard let found else { return .notFound }
         Log.write("found \(app.shortName)'s mute control in \(ms) ms")
         control = found
+        // A new call: the control is in another window, and the previous call's
+        // window is gone. (Minimizing Teams keeps the call window, so the
+        // floating mini window doesn't count; a window rebuilt in place is the same window.)
+        if let window = AXTree.value(found, kAXWindowAttribute), CFGetTypeID(window) == AXUIElementGetTypeID() {
+            let window = window as! AXUIElement
+            let title = AXTree.string(window, kAXTitleAttribute)
+            if let previous = callWindow, !CFEqual(previous, window) {
+                let open = (AXTree.value(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+                if !open.contains(where: { CFEqual($0, previous) }) {
+                    // Only whether the title changed: titles are meeting names.
+                    let changed = title != nil && callTitle != nil && title != callTitle
+                    Log.write("\(app.shortName)'s call window was replaced (the previous one closed; title \(changed ? "changed" : "same"))")
+                    newCall = NewCall(titleChanged: changed)
+                }
+            }
+            callWindow = window
+            callTitle = title
+        }
         if case .success(let label) = AXTree.label(found, for: app) {
             if let muted = MuteLabels.isMuted(label) { return .state(muted) }
             return .unknownLabel(label)

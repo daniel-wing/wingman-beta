@@ -282,7 +282,7 @@ private struct AppIcon: View {
     private var symbol: String { app == .meet ? "video.fill" : "globe" }
 }
 
-private struct PermissionRow: View {
+struct PermissionRow: View {
     let icon: String
     let title: String
     let required: Bool

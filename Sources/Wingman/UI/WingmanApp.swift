@@ -13,13 +13,42 @@ struct WingmanApp: App {
         }
 
         Window("Wingman", id: "transcript") {
-            TranscriptView(recorder: delegate.recorder, watcher: delegate.watcher, reporter: delegate.reporter,
+            TranscriptView(recorder: delegate.recorder, meeting: nil, watcher: delegate.watcher, reporter: delegate.reporter,
                            shortcut: delegate.shortcut)
                 .frame(minWidth: 420, minHeight: 360)
                 .onAppear { WindowPresence.windowOpened() }
                 .onDisappear { WindowPresence.windowClosed() }
         }
         .defaultSize(width: 560, height: 640)
+        .defaultLaunchBehavior(.suppressed)
+        .commands { TranscriptCommands() }
+
+        // One window per call (or transcribed file), recording, finishing or done.
+        WindowGroup("Meeting", id: "meeting", for: UUID.self) { $id in
+            Group {
+                if let id, let meeting = delegate.recorder.meeting(id: id) {
+                    TranscriptView(recorder: delegate.recorder, meeting: meeting, watcher: delegate.watcher,
+                                   reporter: delegate.reporter, shortcut: delegate.shortcut)
+                        .navigationTitle(meeting.meetingName.isEmpty ? "Meeting" : meeting.meetingName)
+                } else {
+                    ClosedMeetingWindow()
+                }
+            }
+            .frame(minWidth: 420, minHeight: 360)
+            .cascadesOverOtherWindows()
+            .onAppear { WindowPresence.windowOpened() }
+            .onDisappear { WindowPresence.windowClosed() }
+        }
+        .defaultSize(width: 560, height: 640)
+        .restorationBehavior(.disabled)
+
+        Window("Meetings", id: "meetings") {
+            MeetingsView(store: delegate.meetings, recorder: delegate.recorder)
+                .frame(minWidth: 720, minHeight: 440)
+                .onAppear { WindowPresence.windowOpened() }
+                .onDisappear { WindowPresence.windowClosed() }
+        }
+        .defaultSize(width: 920, height: 660)
         .defaultLaunchBehavior(.suppressed)
 
         Window("Welcome to Wingman", id: "welcome") {
@@ -41,6 +70,17 @@ struct WingmanApp: App {
         // Opened by macOS as part of launching, until setup is completed. Relying
         // on the menu-bar icon to open it raced with launch and could drop it.
         .defaultLaunchBehavior(AppDelegate.welcomeCompleted ? .suppressed : .presented)
+
+        // Once, on the first launch after Wingman's signature changed.
+        Window("Allow Wingman Again", id: "regrant") {
+            RegrantView(permissions: delegate.permissions) {
+                NSApp.windows.first { $0.identifier?.rawValue == "regrant" }?.close()
+            }
+            .onAppear { WindowPresence.windowOpened() }
+            .onDisappear { WindowPresence.windowClosed() }
+        }
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(AppDelegate.signerChanged ? .presented : .suppressed)
 
         Window("Acknowledgements", id: "acknowledgements") {
             AcknowledgementsView()
@@ -71,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor let shortcut: GlobalShortcut
     @MainActor let muteShortcut: GlobalShortcut
     @MainActor let reporter: ProblemReporter
+    @MainActor let meetings: MeetingsStore
     /// SIGTERM (`kill`, `killall Wingman`) turned into a normal quit.
     @MainActor private var terminateSignal: DispatchSourceSignal?
     #if !APP_STORE
@@ -81,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     override init() {
         recorder = Recorder()
+        let runner = VoiceRecoveryRunner(recorder: recorder)
+        meetings = MeetingsStore(index: recorder.index, runner: runner)
         notifier = Notifier()
         permissions = Permissions(notifier: notifier)
         watcher = CallWatcher(recorder: recorder, notifier: notifier)
@@ -98,6 +141,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updates = Updates(recorder: recorder)
         #endif
         super.init()
+        // Recording goes first: a voice search stops when one starts, and resumes after.
+        let watcherPhase = recorder.onPhaseChange
+        recorder.onPhaseChange = { old, new in
+            watcherPhase?(old, new)
+            runner.phaseChanged(new)
+        }
         #if !APP_STORE
         callMute.onProblem = { [notifier] problem in
             if let problem {
@@ -107,6 +156,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         #endif
+        recorder.onSplit = { [notifier, watcher] meeting in
+            let name = meeting.meetingName.trimmingCharacters(in: .whitespaces)
+            notifier.announceNewCall(name.isEmpty ? nil : name)
+            watcher.noteSplit(meeting)
+        }
+        // Any recorded meeting, stopped or split off: "Meeting saved" once it's done.
+        recorder.onDeleted = { [notifier] message in notifier.announceDeleted(message) }
+        recorder.onMeetingDone = { [watcher] meeting in
+            guard meeting.sourceFile == nil else { return }
+            watcher.announceDone(meeting, report: meeting.callSessionID)
+        }
         shortcut.action = { [weak self] in self?.toggleRecording() }
         muteShortcut.action = { [weak self] in self?.recorder.micMuted.toggle() }
     }
@@ -136,13 +196,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminate.setEventHandler { NSApp.terminate(nil) }
         terminate.resume()
         terminateSignal = terminate
+        if Self.signerChanged {
+            Log.write("Wingman's signature changed since the last launch: asking for the permissions again")
+            NSApp.activate()
+        }
         // Before call detection can start a recording: what a crash left unfinished.
         recorder.recoverInterruptedRecordings()
         watcher.start()
         MainThreadWatchdog.shared.start { [recorder] in
-            MainThreadWatchdog.currentContext(lines: recorder.lines.count, recording: recorder.isRecording)
+            MainThreadWatchdog.currentContext(lines: recorder.current?.lines.count ?? 0, recording: recorder.isRecording)
         }
         recorder.cleanUpAudio()
+        recorder.tidyMeetingData()
+        ReadingPrefs.shared.watchKeys()
         #if !APP_STORE
         callMute.start()
         #endif
@@ -184,9 +250,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     static var welcomeCompleted: Bool { UserDefaults.standard.bool(forKey: "welcomeCompleted") }
+    /// First launch after Wingman's signature changed (decided once, before
+    /// any window: "Allow Wingman Again" opens as part of launching).
+    static let signerChanged = SigningCheck.checkAtLaunch(welcomeCompleted: welcomeCompleted)
 
     /// Opens the welcome guide (set by the menu-bar label, which has SwiftUI's environment).
     @MainActor var openWelcome: (() -> Void)?
+    @MainActor var openMeetings: (() -> Void)?
+
 
     @MainActor
     private func showWelcomeIfHidden() {
@@ -221,9 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if recorder.phase == .idle {
             Task {
                 await recorder.start()
-                if recorder.isRecording {
-                    let name = recorder.meetingName.trimmingCharacters(in: .whitespaces)
-                    notifier.announceRecording(nil, meeting: name.isEmpty ? nil : name, recording: recorder.recordingID)
+                if recorder.isRecording, let current = recorder.current {
+                    let name = current.meetingName.trimmingCharacters(in: .whitespaces)
+                    notifier.announceRecording(nil, meeting: name.isEmpty ? nil : name, recording: current.recordingID)
                 } else if recorder.lastError != nil {
                     watcher.showWindow?()
                 }
@@ -245,6 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mute.state = recorder.micMuted ? .on : .off
         menu.addItem(mute)
         menu.addItem(NSMenuItem(title: "Show Transcript", action: #selector(dockShowWindow), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Meetings…", action: #selector(dockMeetings), keyEquivalent: ""))
         let transcribe = NSMenuItem(title: "Transcribe a Recording…", action: #selector(dockTranscribe), keyEquivalent: "")
         transcribe.isEnabled = recorder.phase == .idle
         menu.addItem(transcribe)
@@ -258,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func dockToggleRecording() { toggleRecording() }
     @MainActor @objc private func dockShowWindow() { watcher.showWindow?() }
+    @MainActor @objc private func dockMeetings() { openMeetings?() }
     @MainActor @objc private func dockToggleMute() { recorder.micMuted.toggle() }
     @MainActor @objc private func dockTranscribe() {
         watcher.showWindow?()
@@ -272,7 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard recorder.phase != .idle else { return .terminateNow }
+        guard recorder.busy else { return .terminateNow }
         Task {
             await recorder.finishForQuit()
             sender.reply(toApplicationShouldTerminate: true)
@@ -286,12 +359,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 private struct MenuBarLabel: View {
     let delegate: AppDelegate
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         icon
             .task {
-                delegate.watcher.showWindow = {
+                delegate.recorder.showMeeting = { meeting in
+                    openWindow(id: "meeting", value: meeting.id)
+                    NSApp.activate()
+                }
+                delegate.recorder.closeMeeting = { meeting in
+                    dismissWindow(id: "meeting", value: meeting.id)
+                }
+                // The meeting recording (or the latest one), else the home window.
+                delegate.watcher.showWindow = { [weak delegate] in
+                    if let meeting = delegate?.recorder.focus {
+                        delegate?.recorder.showMeeting?(meeting)
+                        return
+                    }
                     openWindow(id: "transcript")
                     NSApp.activate()
                     // Activation isn't guaranteed when another app is in front
@@ -304,10 +390,36 @@ private struct MenuBarLabel: View {
                     openSettings()
                     NSApp.activate()
                 }
+                // A "Meeting saved" banner: the meeting in the Wingman window if
+                // it's still there, otherwise in Meetings.
+                delegate.notifier.onOpenNote = { [weak delegate] note in
+                    guard let delegate else { return }
+                    if let open = delegate.recorder.openMeeting(note: note) {
+                        delegate.recorder.showMeeting?(open)
+                    } else {
+                        delegate.meetings.requested = note
+                        openWindow(id: "meetings")
+                        NSApp.activate()
+                    }
+                }
                 delegate.openWelcome = {
                     openWindow(id: "welcome")
                     NSApp.activate()
                 }
+                delegate.openMeetings = {
+                    openWindow(id: "meetings")
+                    NSApp.activate()
+                }
+                #if !NO_DIAGNOSTICS
+                // Development: `open -a Wingman --args -WingmanOpenMeetings <note path>`
+                // opens Meetings on that note, to check the window without clicking.
+                let stress = UserDefaults.standard.double(forKey: "WingmanStress")
+                if stress > 0 { StressLayout.run(recorder: delegate.recorder, seconds: stress) { delegate.watcher.showWindow?() } }
+                if let note = UserDefaults.standard.string(forKey: "WingmanOpenMeetings") {
+                    if !note.isEmpty { delegate.meetings.requested = URL(fileURLWithPath: note) }
+                    openWindow(id: "meetings")
+                }
+                #endif
             }
     }
 
@@ -389,7 +501,11 @@ private struct MenuContent: View {
 
     var body: some View {
         if recorder.isRecording {
+            if watcher.detectionUncertain {
+                Text("Can't tell if the call is still going: recording until you stop")
+            }
             Button("Stop Recording") { Task { await watcher.stopRecording() } }
+            Button("New Note for a New Call") { recorder.split(reason: .user, force: true) }
         } else {
             Button("Start Recording") {
                 showWindow()
@@ -398,6 +514,10 @@ private struct MenuContent: View {
             .disabled(recorder.phase != .idle)
         }
         Button("Show Transcript") { showWindow() }
+        Button("Meetings…") {
+            openWindow(id: "meetings")
+            NSApp.activate()
+        }
         Button("Transcribe a Recording…") {
             showWindow()
             FileImport.choose(for: recorder)
@@ -407,6 +527,15 @@ private struct MenuContent: View {
             Text(status)
         }
         Toggle("Mute My Microphone" + (muteShortcut.shortcut.map { "  \($0.display)" } ?? ""), isOn: $recorder.micMuted)
+        #if !APP_STORE
+        if !AXIsProcessTrusted(), UserDefaults.standard.bool(forKey: "followCallMute") {
+            Button("⚠︎ Accessibility Is Off: Allow Again…") {
+                openWindow(id: "regrant")
+                NSApp.activate()
+            }
+            .help("Without it Wingman can't follow your Teams/Zoom mute or start a new note when a new call begins.")
+        }
+        #endif
         if recorder.isRecording, recorder.callMuteProblem != nil {
             // Also here: the window is often closed during calls. Details are in the window.
             Text("⚠︎ Not following your call mute")

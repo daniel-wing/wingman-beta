@@ -16,7 +16,7 @@ enum ReportDialog {
         call.add("Seen: " + CallWatcher.seen(CallSession(id: call.id, app: .meet, evidence: .strong, meetingCode: nil, browser: nil)), at: start)
         call.add("Recording automatically: Google Meet is set to Record automatically", at: start.addingTimeInterval(1))
         call.add("Recording started", at: start.addingTimeInterval(1))
-        call.add("No calendar event found, so the note is named by time", at: start.addingTimeInterval(1))
+        call.add("No calendar event found, so the note has no meeting name", at: start.addingTimeInterval(1))
         call.add("Call ended", at: start.addingTimeInterval(180))
         call.add("Note saved", at: start.addingTimeInterval(185))
         call.ended = start.addingTimeInterval(180)
