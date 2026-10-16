@@ -84,16 +84,24 @@ final class CallMuteMonitor {
 
     // MARK: - Loop
 
+    /// The recording the probe's timer reading belongs to.
+    private var timerRecording: UUID?
+
     private func tick() async -> Duration {
+        // Each recording starts without a timer reading.
+        if recorder.recordingID != timerRecording {
+            timerRecording = recorder.recordingID
+            await probe.forgetTimer()
+        }
         // Not following the mute, but recording a Teams/Zoom call: still watch
-        // its call window, so a new call right after this one gets its own note.
+        // Teams' call timer, so a new call right after this one gets its own note.
         if !enabled, recorder.isRecording, AXIsProcessTrusted(), let app = callApp() {
             if app != target {
                 target = app
                 await probe.reset()
             }
             _ = await probe.read(app)
-            if let new = await probe.takeNewCall() { recorder.split(reason: .newCallWindow, force: new.titleChanged) }
+            if await probe.takeNewCall() { recorder.split(reason: .newCall) }
             settle(.off, problem: nil)
             return .seconds(2)
         }
@@ -127,7 +135,7 @@ final class CallMuteMonitor {
         }
 
         let reading = await probe.read(app)
-        if let new = await probe.takeNewCall() { recorder.split(reason: .newCallWindow, force: new.titleChanged) }
+        if await probe.takeNewCall() { recorder.split(reason: .newCall) }
         switch reading {
         case .state(let muted):
             misses = 0
@@ -230,35 +238,80 @@ actor AXProbe {
     }
 
     private var control: AXUIElement?
-    /// The window the control was last found in: the call's window, and its title.
-    private var callWindow: AXUIElement?
-    private var callTitle: String?
-    /// The control turned up in a different window after the previous call
-    /// window closed: Teams or Zoom moved on to a new call (see `takeNewCall`).
-    private var newCall: NewCall?
-    struct NewCall: Equatable {
-        /// The new window's title differs from the previous one's (another meeting).
-        let titleChanged: Bool
-    }
+    /// Teams' call timer as last read (`CallTimer`): a new call is the only
+    /// thing that makes it jump. Window changes (sharing, compact view,
+    /// minimizing) never count; they keep the timer.
+    private var timer: CallTimer.Reading?
+    private var timerReadAt = Date.distantPast
+    /// The timer jumped since the last time this was asked: a new call.
+    private var newCall = false
     private var pid: pid_t = 0
     private var triedWebAccessibility = false
     private var timeoutSet = false
 
     func reset() {
         control = nil
-        callWindow = nil
-        callTitle = nil
-        newCall = nil
+        forgetTimer()
         triedWebAccessibility = false
     }
 
-    /// A new call window that appeared since the last time this was asked.
-    func takeNewCall() -> NewCall? {
-        defer { newCall = nil }
+    /// A new recording starts from no timer: the previous call's says nothing about it.
+    func forgetTimer() {
+        timer = nil
+        newCall = false
+    }
+
+    /// Whether Teams moved on to a different call since the last time this was asked.
+    func takeNewCall() -> Bool {
+        defer { newCall = false }
         return newCall
     }
 
     func read(_ app: CallApp) -> Reading {
+        let reading = readMute(app)
+        if app == .teams { checkTimer() }
+        return reading
+    }
+
+    /// Every couple of seconds, the timer in the toolbar of the window holding
+    /// the mute control (not elsewhere: chat messages show times too).
+    private func checkTimer() {
+        let now = Date()
+        guard now.timeIntervalSince(timerReadAt) >= 2, let control,
+              let window = AXTree.value(control, kAXWindowAttribute), CFGetTypeID(window) == AXUIElementGetTypeID(),
+              let seconds = Self.toolbarTimer(in: window as! AXUIElement) else { return }
+        timerReadAt = now
+        let reading = CallTimer.Reading(seconds: seconds, at: now)
+        if let previous = timer, CallTimer.isDifferentCall(previous: previous, now: reading) {
+            Log.write("Teams's call timer jumped: a different call")
+            newCall = true
+        }
+        timer = reading
+    }
+
+    private static func toolbarTimer(in window: AXUIElement) -> Int? {
+        var queue = [window], visited = 0
+        var toolbars: [AXUIElement] = []
+        while !queue.isEmpty, visited < 3000 {
+            let node = queue.removeFirst()
+            visited += 1
+            if AXTree.string(node, kAXRoleAttribute) == "AXToolbar" { toolbars.append(node); continue }
+            queue += (AXTree.value(node, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        }
+        queue = toolbars
+        while !queue.isEmpty, visited < 6000 {
+            let node = queue.removeFirst()
+            visited += 1
+            if AXTree.string(node, kAXRoleAttribute) == "AXStaticText",
+               let text = AXTree.string(node, kAXValueAttribute), let seconds = CallTimer.seconds(text) {
+                return seconds
+            }
+            queue += (AXTree.value(node, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        }
+        return nil
+    }
+
+    private func readMute(_ app: CallApp) -> Reading {
         guard let pid = AXTree.pid(for: app) else {
             control = nil
             return .notRunning
@@ -305,24 +358,6 @@ actor AXProbe {
         guard let found else { return .notFound }
         Log.write("found \(app.shortName)'s mute control in \(ms) ms")
         control = found
-        // A new call: the control is in another window, and the previous call's
-        // window is gone. (Minimizing Teams keeps the call window, so the
-        // floating mini window doesn't count; a window rebuilt in place is the same window.)
-        if let window = AXTree.value(found, kAXWindowAttribute), CFGetTypeID(window) == AXUIElementGetTypeID() {
-            let window = window as! AXUIElement
-            let title = AXTree.string(window, kAXTitleAttribute)
-            if let previous = callWindow, !CFEqual(previous, window) {
-                let open = (AXTree.value(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
-                if !open.contains(where: { CFEqual($0, previous) }) {
-                    // Only whether the title changed: titles are meeting names.
-                    let changed = title != nil && callTitle != nil && title != callTitle
-                    Log.write("\(app.shortName)'s call window was replaced (the previous one closed; title \(changed ? "changed" : "same"))")
-                    newCall = NewCall(titleChanged: changed)
-                }
-            }
-            callWindow = window
-            callTitle = title
-        }
         if case .success(let label) = AXTree.label(found, for: app) {
             if let muted = MuteLabels.isMuted(label) { return .state(muted) }
             return .unknownLabel(label)

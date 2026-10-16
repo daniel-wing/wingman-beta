@@ -33,6 +33,26 @@ enum AXDump {
             try? await Task.sleep(for: .seconds(1))
         }
 
+        // `--windows [seconds]`: every second, each window's kind, frame and
+        // title, whether it holds the mute control, and any timer-like text
+        // ("01:27") in it; printed when anything changes. For telling a screen
+        // share or a compact view from a new call.
+        if let i = args.firstIndex(of: "--windows") {
+            let seconds = (i + 1 < args.count ? Double(args[i + 1]) : nil) ?? 120
+            let end = Date().addingTimeInterval(seconds)
+            var last = ""
+            print("Watching \(app.name)'s windows for \(Int(seconds)) s.")
+            while Date() < end {
+                let summary = windowSummary(application, app: app)
+                if summary != last {
+                    print("— \(Date().formatted(date: .omitted, time: .standard))\n\(summary)")
+                    last = summary
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+            return 0
+        }
+
         if args.contains("--watch") {
             let probe = AXProbe()
             var last = ""
@@ -68,6 +88,50 @@ enum AXDump {
         }
         print("— \(visited) nodes visited, \(printed) printed")
         return 0
+    }
+
+    private static func windowSummary(_ application: AXUIElement, app: CallApp) -> String {
+        let windows = (AXTree.value(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        let mute = AXTree.findMuteControl(in: application, for: app)
+        let muteWindow = mute.flatMap { AXTree.value($0, kAXWindowAttribute) }.map { $0 as! AXUIElement }
+        let main = AXTree.value(application, kAXMainWindowAttribute).map { $0 as! AXUIElement }
+        var lines: [String] = []
+        for (n, window) in windows.enumerated() {
+            var frame = ""
+            if let p = AXTree.value(window, kAXPositionAttribute), let s = AXTree.value(window, kAXSizeAttribute) {
+                var point = CGPoint.zero, size = CGSize.zero
+                AXValueGetValue(p as! AXValue, .cgPoint, &point)
+                AXValueGetValue(s as! AXValue, .cgSize, &size)
+                frame = "\(Int(point.x)),\(Int(point.y)) \(Int(size.width))×\(Int(size.height))"
+            }
+            let subrole = AXTree.string(window, kAXSubroleAttribute) ?? "-"
+            let title = AXTree.string(window, kAXTitleAttribute) ?? ""
+            let minimized = (AXTree.value(window, kAXMinimizedAttribute) as? Bool) == true ? " minimized" : ""
+            let isMute = muteWindow.map { CFEqual($0, window) } == true ? " [MUTE]" : ""
+            let isMain = main.map { CFEqual($0, window) } == true ? " [main]" : ""
+            let timers = timerTexts(in: window)
+            lines.append("  #\(n) \(subrole) \(frame)\(minimized)\(isMute)\(isMain) “\(title)”"
+                         + (timers.isEmpty ? "" : " timers: \(timers.joined(separator: ", "))"))
+        }
+        if let mute, case .success(let label) = AXTree.label(mute, for: app) { lines.append("  mute label: “\(label)”") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Text like "01:27" or "1:02:03" anywhere in a window (a call timer).
+    private static func timerTexts(in window: AXUIElement) -> [String] {
+        var found: [String] = []
+        var queue = [window], visited = 0
+        let pattern = try! Regex("^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?$")
+        while !queue.isEmpty, visited < 5000 {
+            let node = queue.removeFirst()
+            visited += 1
+            for attribute in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+                if let text = AXTree.string(node, attribute)?.trimmingCharacters(in: .whitespaces),
+                   text.wholeMatch(of: pattern) != nil { found.append(text) }
+            }
+            queue += (AXTree.value(node, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        }
+        return found
     }
 
     private static func describe(_ element: AXUIElement) -> String {

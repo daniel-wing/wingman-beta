@@ -34,8 +34,9 @@ Wingman la lee desde la app Calendario ([pasos](#connect-your-work-calendar)).
   records automatically, or ignores it; you choose per app. Recording stops when the
   call ends. ([How Google Meet is recognized](#google-meet).) Optionally it opens when
   you log in (Settings).
-- **One note per call.** Each call gets its own note and window, even when Teams or Zoom
-  goes straight into the next call (**Join with Previous** undoes a wrong split). A test
+- **One note per call.** Each call gets its own note and window, even when Teams goes
+  straight into the next call; for anything else, **New Note** starts one by hand
+  (**Join with Previous** undoes a split). Sharing your screen never splits a call. A test
   call you don't need? **Delete Meeting…** moves its note and audio to the Trash.
 - **Live transcript.** Read along as people talk. English and Spanish can be mixed in
   the same meeting, even in the same sentence ("vamos a revisar el *dashboard* de
@@ -351,10 +352,12 @@ Wingman recognizes a Meet call from what Chrome itself shows, never from the pag
 - Following your mute works with the Teams and Zoom apps, not yet with Google Meet or
   other calls in a browser (mute Wingman with ⌃⌥M), and has been tested with their English versions. If you use them in another language,
   check that Wingman's *You're muted* line matches, and tell me if it doesn't.
-- Back-to-back calls are told apart by Teams or Zoom opening a new call window (with
-  Accessibility on). In a browser, a new Google Meet link is a new call; two calls in
-  the same browser tab with no pause between them stay in one note: stop and start
-  again between them.
+- Back-to-back calls are told apart in the **Teams app** by its call timer starting
+  again (with Accessibility on), and in a browser by a new Google Meet link. Zoom calls,
+  and two calls in the same browser tab, straight after one another stay in one note
+  unless there's a pause between them: use **New Note** (window or menu bar) when a new
+  call starts. A Teams meeting you join late, straight after another call, also stays in
+  the previous note.
 - Taking AirPods in and out during a call can split the meeting into two notes.
 - For meetings recorded before 0.9, finding voices in the old audio is cautious: it often
   finds none clear enough to offer, and then only the names change.

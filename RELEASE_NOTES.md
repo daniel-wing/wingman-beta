@@ -1,5 +1,16 @@
 # Release notes
 
+## 0.9.1 — sharing your screen no longer splits a call
+
+- **Fix:** in 0.9.0, sharing your screen in Teams (and stopping) could start a new note
+  in the middle of a call, so one meeting ended up in two or three notes. Teams moves its
+  mute button into a small window while you share, and 0.9.0 took that for a new call.
+  Now Wingman goes by Teams' own call timer, which keeps counting while you share, use
+  the compact view or minimize the meeting: a new note starts only when the timer starts
+  again for a new call.
+- Zoom calls straight after one another stay in one note, as in 0.8; use **New Note**
+  when a new call starts.
+
 ## 0.9.0 — name speakers after the meeting
 
 - **Signed and notarized by Apple.** Wingman now carries an Apple Developer ID and is
@@ -9,7 +20,7 @@
   the old Wingman switched on: select it, click −, then click Allow in Wingman. Until
   Accessibility is allowed again, Wingman can't follow your Teams/Zoom mute or split
   back-to-back calls, and its menu says so.
-- **Back-to-back calls get their own notes.** When Teams or Zoom moves straight on to
+- **Back-to-back calls get their own notes.** When Teams moves straight on to
   the next call, Wingman starts a new note at that moment, with no gap in the audio, and
   says so; **Join with Previous** undoes it for a minute. Before, both calls ended up in
   one note.

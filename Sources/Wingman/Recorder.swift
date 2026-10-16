@@ -644,8 +644,8 @@ final class Recorder {
     }
 
     enum SplitReason: String {
-        /// Teams or Zoom replaced its call window: a new call in the same app.
-        case newCallWindow = "new call window"
+        /// Teams' call timer jumped: a different call in the same app (`CallTimer`).
+        case newCall = "call timer jumped"
         /// The user asked for a new note (New Note).
         case user = "asked"
     }
@@ -684,7 +684,7 @@ final class Recorder {
         next.callApp = previous.callApp
         next.callSessionID = previous.callSessionID
         next.callMeetingCode = previous.callMeetingCode
-        next.joinable = reason == .newCallWindow
+        next.joinable = reason == .newCall
         previous.setEnded(Date())
         let writers = installWriters(for: next)
         current = next
@@ -722,7 +722,7 @@ final class Recorder {
     /// Development: a split as a new call window makes it (Join with Previous
     /// stays possible for a minute), for `recordtest --join`.
     func splitAsNewCall() {
-        split(reason: .newCallWindow, force: true)
+        split(reason: .newCall, force: true)
     }
     #endif
 
