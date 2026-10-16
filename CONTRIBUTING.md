@@ -175,7 +175,8 @@ Official builds are made by the maintainer with `scripts/make-release.sh`. It ru
 tests, builds from a clean copy of the last commit with the exact pinned dependency
 versions, signs with the maintainer's Apple Developer ID (hardened runtime, with
 `Wingman.entitlements` declaring the microphone and calendar), has Apple notarize it
-(`scripts/notarize.sh`), checks that Gatekeeper accepts the exact zip, signs the update
+(`scripts/notarize.sh`), checks that Gatekeeper accepts the exact zip, builds the installer
+disk image (`scripts/make-dmg.sh`, laid out by dmgbuild, itself notarized), signs the update
 with the key that installed copies trust, and checks the release, the public tree and its
 history for identifying details (`scripts/check-public.sh`). `DEVELOPER_ID=1 ./install.sh`
 does the signing part on its own, for a maintainer with the certificate.

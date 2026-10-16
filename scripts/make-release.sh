@@ -12,7 +12,9 @@
 # ~/.config/wingman/team-id (kept out of the repo; a build signed by any
 # other team is refused).
 #
-#   scripts/make-release.sh        → .build/dist/Wingman-<version>.zip (+ .sha256)
+#   scripts/make-release.sh        → .build/dist/Wingman-<version>.dmg (+ .sha256), the
+#                                    installer people download (scripts/make-dmg.sh),
+#                                    .build/dist/Wingman-<version>.zip (+ .sha256)
 #                                    and .build/dist/appcast.xml (the update feed)
 #
 # Automatic updates: the zip is signed with the project's update key, which
@@ -123,6 +125,11 @@ fi
 rm -rf "$CHECK"
 (cd "$OUT" && shasum -a 256 "$(basename "$ZIP")" | tee "$(basename "$ZIP").sha256")
 echo "==> $ZIP"
+
+# The installer people download by hand (the zip is for automatic updates):
+# the same app, in a disk image with an arrow to Applications, itself signed,
+# notarized and checked.
+scripts/make-dmg.sh "$APP" "$OUT/Wingman-$VERSION.dmg"
 
 # The update feed. The key in the keychain must match the one the app trusts,
 # or every installed copy would reject this update.

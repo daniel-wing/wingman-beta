@@ -10,6 +10,8 @@
   again for a new call.
 - Zoom calls straight after one another stay in one note, as in 0.8; use **New Note**
   when a new call starts.
+- **Easier install:** download **Wingman-0.9.1.dmg**, open it and drag Wingman onto the
+  Applications folder shown next to it. (Automatic updates are unchanged.)
 
 ## 0.9.0 — name speakers after the meeting
 

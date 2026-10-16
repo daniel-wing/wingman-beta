@@ -177,13 +177,13 @@ people*, some places also require consent to keep someone's voiceprint.
 ## Install
 
 1. Open the [latest release](https://github.com/daniel-wing/wingman-beta/releases/latest)
-   and, under **Assets**, click the **Wingman-….zip** file (not *Source code*, which is
-   Wingman's code — see [License](#license)).
-2. Open your **Downloads** folder. If you already see the Wingman app, your browser
-   unzipped it for you; otherwise double-click the zip. Drag **Wingman** into
-   **Applications**.
-3. Double-click Wingman in Applications. macOS asks whether to open an app downloaded
-   from the internet: click **Open**.
+   and, under **Assets**, click **Wingman-….dmg** (not *Source code*, which is Wingman's
+   code — see [License](#license)).
+2. Open it from your **Downloads**. A window shows Wingman, an arrow and your
+   **Applications** folder: drag **Wingman** onto **Applications**.
+3. Open Wingman from **Applications** (or Launchpad / Spotlight). macOS asks whether to
+   open an app downloaded from the internet: click **Open**. You can then eject the
+   Wingman disk (the ⏏ next to it in Finder) and move the .dmg to the Trash.
 4. A short welcome guide explains each permission before macOS asks for it. When you
    finish it, the guide closes and Wingman moves to the menu bar (see
    [Where is Wingman?](#where-is-wingman)). It then downloads its speech models (about
