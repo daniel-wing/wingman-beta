@@ -12,6 +12,11 @@ import Foundation
 /// the last check-in: blocked for 5 s, it logs those facts with the memory in
 /// use, again at 10, 30, 60 s and every minute after, and once more when the
 /// main thread is back. No meeting content: only window identifiers and counts.
+///
+/// Blocked for `releaseAudioAfter` seconds while recording, it also releases
+/// the audio devices (`AudioEmergencyStop`), so force-quitting the hung app
+/// can't break the call's audio; `onResumedAfterRelease` then has the recorder
+/// rebuild capture.
 final class MainThreadWatchdog: @unchecked Sendable {
     struct Context: Equatable {
         /// The key window's identifier ("transcript", "meetings"…), or "none".
@@ -19,7 +24,16 @@ final class MainThreadWatchdog: @unchecked Sendable {
         var liveResize = false
         var lines = 0
         var recording = false
+        /// Each meeting window's state: "visible", "covered", "minimized",
+        /// "hidden" or "other space"; "none" without one.
+        var meetingWindow = "none"
     }
+
+    static let releaseAudioAfter: Double = 20
+
+    /// Called on the main thread when it responds again after the audio was
+    /// released, with how long it was blocked.
+    @MainActor var onResumedAfterRelease: ((Double) -> Void)?
 
     static let shared = MainThreadWatchdog()
 
@@ -27,6 +41,7 @@ final class MainThreadWatchdog: @unchecked Sendable {
     private var lastBeat = DispatchTime.now()
     private var context = Context()
     private var reportedAt: Double = 0
+    private var releasedAudio = false
     private var timer: Timer?
     private var checker: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "wingman.watchdog", qos: .utility)
@@ -56,13 +71,16 @@ final class MainThreadWatchdog: @unchecked Sendable {
         lock.lock()
         let blockedFor = Double(DispatchTime.now().uptimeNanoseconds - lastBeat.uptimeNanoseconds) / 1e9
         let wasReported = reportedAt > 0
+        let wasReleased = releasedAudio
         lastBeat = .now()
         context = now
         reportedAt = 0
+        releasedAudio = false
         lock.unlock()
         if wasReported {
             Log.write(String(format: "main thread responding again after %.0f s", blockedFor))
         }
+        if wasReleased { MainActor.assumeIsolated { onResumedAfterRelease?(blockedFor) } }
     }
 
     private func check() {
@@ -72,11 +90,24 @@ final class MainThreadWatchdog: @unchecked Sendable {
         let next = Self.nextReport(after: reportedAt)
         let due = blocked >= next
         if due { reportedAt = next }
+        let release = Self.shouldReleaseAudio(blocked: blocked, recording: facts.recording, alreadyReleased: releasedAudio)
+        if release { releasedAudio = true }
         lock.unlock()
-        guard due else { return }
-        Log.write(String(format: "main thread blocked for %.0f s — key window %@%@, %d transcript lines, %@, memory %@",
-                         blocked, facts.window, facts.liveResize ? " (being resized)" : "", facts.lines,
-                         facts.recording ? "recording" : "not recording", Self.memoryInUse()))
+        if due {
+            Log.write(String(format: "main thread blocked for %.0f s — key window %@%@, meeting window %@, %d transcript lines, %@, memory %@",
+                             blocked, facts.window, facts.liveResize ? " (being resized)" : "", facts.meetingWindow, facts.lines,
+                             facts.recording ? "recording" : "not recording", Self.memoryInUse()))
+        }
+        if release {
+            let stopped = AudioEmergencyStop.shared.stopAll()
+            Log.write(String(format: "main thread blocked for %.0f s while recording: released %@ so the call isn't disturbed",
+                             blocked, stopped.isEmpty ? "nothing (no capture running)" : stopped.joined(separator: " and ")))
+        }
+    }
+
+    /// Once per hang, after `releaseAudioAfter` seconds, only while recording.
+    static func shouldReleaseAudio(blocked: Double, recording: Bool, alreadyReleased: Bool) -> Bool {
+        recording && !alreadyReleased && blocked >= releaseAudioAfter
     }
 
     /// 5, 10, 30, 60 s, then every minute.
@@ -101,7 +132,17 @@ final class MainThreadWatchdog: @unchecked Sendable {
     @MainActor
     static func currentContext(lines: Int, recording: Bool) -> Context {
         let key = NSApp.keyWindow
+        let meetings = NSApp.windows.filter { $0.identifier?.rawValue.hasPrefix("meeting") == true }
         return Context(window: key?.identifier?.rawValue ?? (key == nil ? "none" : "other"),
-                       liveResize: NSApp.windows.contains { $0.inLiveResize }, lines: lines, recording: recording)
+                       liveResize: NSApp.windows.contains { $0.inLiveResize }, lines: lines, recording: recording,
+                       meetingWindow: meetings.isEmpty ? "none" : meetings.map(state(of:)).joined(separator: ", "))
+    }
+
+    @MainActor
+    private static func state(of window: NSWindow) -> String {
+        if window.isMiniaturized { return "minimized" }
+        if !window.isVisible { return "hidden" }
+        if !window.isOnActiveSpace { return "other space" }
+        return window.occlusionState.contains(.visible) ? "visible" : "covered"
     }
 }

@@ -206,6 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainThreadWatchdog.shared.start { [recorder] in
             MainThreadWatchdog.currentContext(lines: recorder.current?.lines.count ?? 0, recording: recorder.isRecording)
         }
+        MainThreadWatchdog.shared.onResumedAfterRelease = { [recorder] seconds in recorder.resumeAfterHang(seconds: seconds) }
         recorder.cleanUpAudio()
         recorder.tidyMeetingData()
         ReadingPrefs.shared.watchKeys()
@@ -415,6 +416,7 @@ private struct MenuBarLabel: View {
                 // opens Meetings on that note, to check the window without clicking.
                 let stress = UserDefaults.standard.double(forKey: "WingmanStress")
                 if stress > 0 { StressLayout.run(recorder: delegate.recorder, seconds: stress) { delegate.watcher.showWindow?() } }
+                if UserDefaults.standard.bool(forKey: "WingmanHangTest") { HangTest.run(recorder: delegate.recorder) }
                 if let note = UserDefaults.standard.string(forKey: "WingmanOpenMeetings") {
                     if !note.isEmpty { delegate.meetings.requested = URL(fileURLWithPath: note) }
                     openWindow(id: "meetings")

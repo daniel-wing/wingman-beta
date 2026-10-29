@@ -20,6 +20,7 @@ final class MicCapture {
     /// Counts engine starts, so a delayed re-check only looks at its own one.
     private var generation = 0
     private var recheckScheduled = false
+    private var emergencyStop: UUID?
     /// Called (on the main queue) when macOS reconfigures the mic's audio
     /// device and the engine stops, e.g. AirPods taking over as the input.
     var onInterrupted: (() -> Void)?
@@ -87,6 +88,11 @@ final class MicCapture {
         }
         engine.prepare()
         try engine.start()
+        // If the main thread hangs, the watchdog stops this engine from its own
+        // thread, so a force quit doesn't break the call's audio device.
+        let running = engine
+        AudioEmergencyStop.shared.unregister(emergencyStop)
+        emergencyStop = AudioEmergencyStop.shared.register("microphone") { running.stop() }
         Log.write("mic started: \(voiceProcessing ? "voice processing" : "plain"), \(Int(format.sampleRate)) Hz, \(format.channelCount) ch")
         startedAt = Date()
         generation += 1
@@ -122,6 +128,8 @@ final class MicCapture {
     }
 
     private func reset() {
+        AudioEmergencyStop.shared.unregister(emergencyStop)
+        emergencyStop = nil
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = nil
         engine.inputNode.removeTap(onBus: 0)

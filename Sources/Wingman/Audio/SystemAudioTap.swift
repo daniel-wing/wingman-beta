@@ -41,6 +41,12 @@ final class SystemAudioTap {
     /// The rate audio was last measured arriving at, for diagnostics.
     var lastMeasuredRate: Double { rateCheck?.lastMeasured ?? 0 }
     private var watchdog: DispatchSourceTimer?
+    /// Guards the devices, which the watchdog may release from its own thread
+    /// while the main thread hangs (`AudioEmergencyStop`).
+    private let devicesLock = NSLock()
+    /// The devices were released that way; the recorder rebuilds capture.
+    private var released = false
+    private var emergencyStop: UUID?
     private var lastCallbacks = 0
     private var lastProgress = ProcessInfo.processInfo.systemUptime
 
@@ -54,16 +60,38 @@ final class SystemAudioTap {
             throw error
         }
         startWatchdog()
+        emergencyStop = AudioEmergencyStop.shared.register("call audio") { [weak self] in self?.releaseFromAnyThread() }
     }
 
     func stop() {
+        AudioEmergencyStop.shared.unregister(emergencyStop)
+        emergencyStop = nil
         active = false
         watchdog?.cancel()
         watchdog = nil
         teardown()
     }
 
+    /// The watchdog's way out while the main thread is blocked: stops and
+    /// removes the tap and its device. Skipped if the main thread is itself in
+    /// the middle of building or removing them.
+    private func releaseFromAnyThread() {
+        guard devicesLock.try() else { return }
+        defer { devicesLock.unlock() }
+        released = true
+        releaseDevices()
+    }
+
+    private var isReleased: Bool { devicesLock.withLock { released } }
+
     private func startCapture(onSamples: @escaping ([Float]) -> Void) throws {
+        try devicesLock.withLock {
+            released = false
+            try createCapture(onSamples: onSamples)
+        }
+    }
+
+    private func createCapture(onSamples: @escaping ([Float]) -> Void) throws {
         let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         description.uuid = UUID()
         description.name = "Wingman"
@@ -155,6 +183,11 @@ final class SystemAudioTap {
             AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
         }
         listeners = []
+        devicesLock.withLock { releaseDevices() }
+    }
+
+    /// Call with `devicesLock` held.
+    private func releaseDevices() {
         if aggregateID != kAudioObjectUnknown {
             AudioDeviceStop(aggregateID, procID)
             if let procID { AudioDeviceDestroyIOProcID(aggregateID, procID) }
@@ -190,7 +223,7 @@ final class SystemAudioTap {
     /// a moment after the change so macOS has finished switching.
     private func scheduleRestart(measured: Double? = nil, why: String = "a rate change") {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.active, !self.restartPending, let onSamples = self.onSamples else { return }
+            guard let self, self.active, !self.restartPending, !self.isReleased, let onSamples = self.onSamples else { return }
             // Never loop: at most 3 restarts in 20 seconds. A restart over the
             // limit is postponed, not dropped, so capture can't stay broken.
             let now = Date()
@@ -242,7 +275,7 @@ final class SystemAudioTap {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
-            guard let self, self.active, !self.restartPending, !self.restartDeferred else { return }
+            guard let self, self.active, !self.restartPending, !self.restartDeferred, !self.isReleased else { return }
             let count = self.counters.callbacks
             let now = ProcessInfo.processInfo.systemUptime
             if count != self.lastCallbacks {

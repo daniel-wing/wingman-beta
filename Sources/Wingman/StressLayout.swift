@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import CoreGraphics
 
 /// Development only: `open -a Wingman --args -WingmanStress <seconds>` fills the
@@ -22,6 +23,10 @@ enum StressLayout {
         recorder.showMeeting?(meeting)
         recorder.stressFill(lines: 50)
         let start = Date()
+        if UserDefaults.standard.bool(forKey: "WingmanStressFollow") {
+            follow(meeting, recorder: recorder, seconds: seconds, start: start)
+            return
+        }
         var tick = 0
         Log.write("stress: \(Int(seconds)) s of live text and continuous resizing")
         let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { timer in
@@ -52,6 +57,50 @@ enum StressLayout {
                     if Date().timeIntervalSince(start) > seconds { t.invalidate(); recorder.micMuted = false; return }
                     recorder.micMuted.toggle()
                 }
+            }
+        }
+    }
+
+    /// `-WingmanStressFollow YES`: a call as the field Mac sees it, without any
+    /// resizing. Two people talk over each other: each has a live line revised
+    /// several times a second that becomes final after a few seconds, and the
+    /// transcript follows them. Wingman's mute goes on and off every few
+    /// seconds, so the status line above the list comes and goes, as when
+    /// following a call's mute. Leave another app in front, as during a call.
+    private static func follow(_ meeting: Meeting, recorder: Recorder, seconds: Double, start: Date) {
+        let words = "so the numbers for this quarter look better than we expected but we still need to check the plan".split(separator: " ")
+        struct Voice { var id = UUID(); var began: TimeInterval; var words = 0 }
+        let speakers: [Speaker] = [.them, .me]
+        var voices = [Voice(began: 300), Voice(began: 301.5)]
+        var tick = 0
+        Log.write("stress: \(Int(seconds)) s of two overlapping live lines, no resizing")
+        let timer = Timer(timeInterval: 0.25, repeats: true) { timer in
+            MainActor.assumeIsolated {
+                tick += 1
+                let elapsed = Date().timeIntervalSince(start)
+                guard elapsed < seconds else {
+                    timer.invalidate()
+                    recorder.micMuted = false
+                    Log.write("stress: done, \(meeting.lines.count) lines")
+                    return
+                }
+                if tick % 11 == 0 { recorder.micMuted.toggle() }
+                let i = tick % 2
+                voices[i].words += 1 + tick % 3
+                let text = (0..<voices[i].words).map { words[($0 + tick) % words.count] }.joined(separator: " ")
+                let now = 300 + elapsed
+                let final = voices[i].words > 8 + (tick % 7) * 3
+                meeting.handle(TranscriptEvent(utteranceID: voices[i].id, speaker: speakers[i], start: voices[i].began,
+                                               end: now, text: text, isFinal: final))
+                if final { voices[i] = Voice(began: now) }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        // -WingmanStressMinimize: minimized a few seconds in, as during a call.
+        if UserDefaults.standard.bool(forKey: "WingmanStressMinimize") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("meeting") == true }?.miniaturize(nil)
+                Log.write("stress: window minimized")
             }
         }
     }
@@ -105,6 +154,69 @@ enum StressLayout {
 }
 
 #if !NO_DIAGNOSTICS
+/// Development only: `-WingmanHangTest YES` records for about a minute with the
+/// main thread blocked for 30 s in the middle, to check that the watchdog lets
+/// go of the microphone and call audio while it's hung and that capture comes
+/// back afterwards. Results go to wingman.log ("hang test: …"); run
+/// `Wingman whosmic --watch 90` alongside to see the microphone let go and
+/// come back. Uses the microphone and system audio: never during a call.
+@MainActor
+enum HangTest {
+    static func run(recorder: Recorder) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            await recorder.start()
+            guard recorder.isRecording else {
+                Log.write("hang test: the recording didn't start (\(recorder.lastError ?? "no error"))")
+                return
+            }
+            recorder.current?.meetingName = "hang test"
+            recorder.current?.applyMeetingName()
+            try? await Task.sleep(for: .seconds(10))
+            Log.write("hang test: before the hang — \(holding())")
+            for after in [12.0, 26.0] {
+                DispatchQueue.global().asyncAfter(deadline: .now() + after) {
+                    Log.write("hang test: \(Int(after)) s into the hang — \(holding())")
+                }
+            }
+            Log.write("hang test: blocking the main thread for 30 s")
+            blockMainThread(seconds: 30)
+            try? await Task.sleep(for: .seconds(8))
+            Log.write("hang test: 8 s after the hang — \(holding()); notice shown: \(recorder.current?.notice != nil)")
+            try? await Task.sleep(for: .seconds(12))
+            let meeting = await recorder.stop()
+            await meeting?.waitUntilDone()
+            Log.write("hang test: done, note \(meeting?.currentNote?.path ?? "none")")
+        }
+    }
+
+    /// A hang as the field Mac had them: the main thread does nothing else.
+    private static func blockMainThread(seconds: TimeInterval) {
+        Thread.sleep(forTimeInterval: seconds)
+    }
+
+    /// How many call-audio devices this process has; callable from any thread.
+    /// (Whether it holds the microphone shows from outside, with `whosmic`:
+    /// Wingman's own process list leaves itself out.)
+    nonisolated private static func holding() -> String {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size)
+        var devices = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &devices)
+        let taps = devices.filter { device in
+            var name: CFString = "" as CFString
+            var nameSize = UInt32(MemoryLayout<CFString>.size)
+            var nameAddress = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName,
+                                                         mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            let status = withUnsafeMutablePointer(to: &name) { AudioObjectGetPropertyData(device, &nameAddress, 0, nil, &nameSize, $0) }
+            return status == noErr && (name as String) == "Wingman Tap"
+        }.count
+        return "call-audio devices: \(taps)"
+    }
+}
+
 extension Recorder {
     /// `count` made-up final lines, alternating speakers, of varied lengths.
     func stressFill(lines count: Int) {

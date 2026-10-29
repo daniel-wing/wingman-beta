@@ -48,7 +48,9 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 SRC=/private/tmp/wingman-release
-if [[ -d "$SRC/.git" ]]; then
+# macOS clears old files out of /tmp every few days, which can leave a copy
+# whose .git is only half there: start again from a fresh clone then.
+if [[ -d "$SRC/.git" ]] && git -C "$SRC" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git -C "$SRC" fetch -q "$PWD" HEAD
   git -C "$SRC" checkout -q --force --detach FETCH_HEAD
   git -C "$SRC" clean -q -f -d -x -e .build

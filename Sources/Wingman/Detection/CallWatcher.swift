@@ -197,9 +197,15 @@ final class CallWatcher {
     /// Follows the policy for a call that has started: record, ask, or nothing.
     private func offer(_ session: CallSession) {
         guard !answered.contains(session.id) else { return }
-        let policy = policy(for: session)
+        var policy = policy(for: session)
         note(session.id, Self.offerStep(session, policy: policy, meet: self.policy(for: .meet), browser: self.policy(for: .browser)),
              outcome: policy == .ask ? .asked : policy == .off ? .notRecorded : nil)
+        if policy == .automatic, Self.asksAfterRestart(restartedDuringRecording: recorder.restartedDuringRecording) {
+            policy = .ask
+            note(session.id, "Wingman had stopped during a recording and just started again, so it asks before recording this call",
+                 outcome: .asked)
+            Log.write("asking before recording: Wingman restarted after a recording was interrupted")
+        }
         switch policy {
         case .automatic:
             Task { await record(session) }
@@ -223,6 +229,18 @@ final class CallWatcher {
         case .off:
             break
         }
+    }
+
+    /// Right after Wingman restarts from a run that ended mid-recording, a call
+    /// that's already going is most likely the one that was being recorded.
+    /// Tapping it again at once, while macOS is still cleaning up after the
+    /// old process, disturbed the call's audio on the field Mac (a Bluetooth
+    /// headset), so for the first two minutes Wingman asks instead.
+    nonisolated static let askAfterRestartFor: TimeInterval = 120
+
+    nonisolated static func asksAfterRestart(restartedDuringRecording: Date?, now: Date = Date()) -> Bool {
+        guard let restarted = restartedDuringRecording else { return false }
+        return now.timeIntervalSince(restarted) < askAfterRestartFor
     }
 
     /// For a call's report: what Wingman did when the call started, and why.

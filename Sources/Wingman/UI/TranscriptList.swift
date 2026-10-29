@@ -434,6 +434,7 @@ struct TranscriptList<Empty: View>: View {
     @ViewBuilder var empty: () -> Empty
     private let prefs = ReadingPrefs.shared
     @State private var nearBottom = true
+    @State private var follower = TranscriptFollower()
     /// The lines as they were when the window started being resized: while the
     /// edge is dragged, the list only re-measures, without new text or scrolling
     /// on top. New lines appear when it's let go.
@@ -461,10 +462,13 @@ struct TranscriptList<Empty: View>: View {
                 .padding(12)
                 .modifier(OldLayoutSelection())
             }
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 80
-            } action: { _, near in
-                nearBottom = near
+            .onScrollGeometryChange(for: TranscriptFollower.Distance.self) { geometry in
+                TranscriptFollower.distance(offset: geometry.contentOffset.y, visible: geometry.containerSize.height,
+                                            content: geometry.contentSize.height)
+            } action: { _, distance in
+                follower.settle(distance) { near in
+                    if nearBottom != near { nearBottom = near }
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.willStartLiveResizeNotification)) { note in
                 guard live, !StressLayout.oldLayout, (note.object as? NSWindow)?.isKeyWindow == true else { return }
@@ -476,7 +480,7 @@ struct TranscriptList<Empty: View>: View {
             .onChange(of: rows.last?.text) {
                 // Follow only someone already at the bottom, and not while finding or naming.
                 guard live, nearBottom, !find.shown, walk.speaker == nil, let last = rows.last else { return }
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(last.id, anchor: .bottom) }
+                follower.follow(last.id) { proxy.scrollTo($0, anchor: .bottom) }
             }
             .onChange(of: current) {
                 if let current { withAnimation { proxy.scrollTo(rows[current.row].id, anchor: .center) } }
@@ -495,6 +499,66 @@ struct TranscriptList<Empty: View>: View {
                     .padding(12)
                 }
             }
+        }
+    }
+}
+
+/// Keeps a live transcript following its newest line without feeding back into
+/// its own layout. On the field Mac (0.9.1) the list's main thread got stuck
+/// re-placing its rows during calls: macOS reported "OnScrollGeometryChange
+/// tried to update multiple times per frame", because the near-the-bottom flag
+/// was written during layout and an animated scroll was started on every
+/// revision of the live line, each one changing the geometry again. Here:
+/// - the flag has a dead band (near within 80 pt, away beyond 200 pt), so a few
+///   points of re-measuring can't flip it back and forth;
+/// - it's written after the layout pass, once, with the latest value;
+/// - following scrolls at most every 0.25 s, to the newest line then, without
+///   animation.
+@MainActor
+final class TranscriptFollower {
+    enum Distance: Equatable { case near, between, away }
+
+    nonisolated static let nearWithin: CGFloat = 80
+    nonisolated static let awayBeyond: CGFloat = 200
+    nonisolated static let followInterval: TimeInterval = 0.25
+
+    nonisolated static func distance(offset: CGFloat, visible: CGFloat, content: CGFloat) -> Distance {
+        let below = content - (offset + visible)
+        if below <= nearWithin { return .near }
+        return below > awayBeyond ? .away : .between
+    }
+
+    private var pendingNear: Bool?
+    private var pendingTarget: String?
+    private var lastFollow: TimeInterval = -.infinity
+
+    /// Hands `apply` the new near-the-bottom value on the next turn of the run
+    /// loop; several changes in one pass become one write, the last.
+    func settle(_ distance: Distance, apply: @escaping (Bool) -> Void) {
+        guard distance != .between else { return }
+        let scheduled = pendingNear != nil
+        pendingNear = distance == .near
+        guard !scheduled else { return }
+        DispatchQueue.main.async { [self] in
+            guard let near = pendingNear else { return }
+            pendingNear = nil
+            apply(near)
+        }
+    }
+
+    /// Scrolls to `id` soon: at once if the last scroll was a while ago,
+    /// otherwise when the interval is up, to whichever line is newest by then.
+    func follow(_ id: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime,
+                scroll: @escaping (String) -> Void) {
+        let scheduled = pendingTarget != nil
+        pendingTarget = id
+        guard !scheduled else { return }
+        let wait = max(0, lastFollow + Self.followInterval - now)
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [self] in
+            guard let target = pendingTarget else { return }
+            pendingTarget = nil
+            lastFollow = ProcessInfo.processInfo.systemUptime
+            scroll(target)
         }
     }
 }
@@ -521,7 +585,7 @@ struct LineView: View {
 
     @ViewBuilder private var speaker: some View {
         let label = Text(row.name)
-            .font(.system(size: size - 1, weight: .semibold))
+            .font(.system(size: labelSize, weight: .medium))
             .foregroundStyle(color)
             .lineLimit(1)
             .truncationMode(.tail)
@@ -542,6 +606,25 @@ struct LineView: View {
         }
     }
 
+    /// Why a line needs checking, if it does.
+    @ViewBuilder private var marker: some View {
+        if row.incomplete {
+            Image(systemName: "exclamationmark.bubble.fill")
+                .foregroundStyle(.orange)
+                .help("The speech model failed on this line; this is what it had heard so far.")
+        } else if row.possibleEcho {
+            Image(systemName: "speaker.wave.2.bubble")
+                .foregroundStyle(.secondary)
+                .help("This may be the call coming back through your speakers rather than you. It's kept because it isn't a clear repeat.")
+        } else if row.unclear {
+            Image(systemName: "questionmark.circle.fill")
+                .foregroundStyle(.orange)
+                .help(row.confidence < 1
+                      ? "Wingman wasn't sure about this line (confidence \(Int(row.confidence * 100))%). Check it against the audio."
+                      : "Wingman wasn't sure about this line. Check it against the audio.")
+        }
+    }
+
     /// The text with Find's matches highlighted.
     private var text: Text {
         guard !highlights.isEmpty else { return Text(row.text) }
@@ -554,19 +637,23 @@ struct LineView: View {
         return Text(attributed)
     }
 
+    /// The name and time line above the text: smaller than the text, so the
+    /// text gets the window's whole width.
+    private var labelSize: CGFloat { max(10, (size * 0.8).rounded()) }
+
     var body: some View {
-        // Top alignment, not first-baseline: lining up the baselines of
+        // A stack, never baseline alignment: lining up the baselines of
         // selectable text makes SwiftUI measure each line's AppKit text view on
-        // every layout pass, which (with live resizing) froze 0.8.1. The small
-        // offsets put the smaller timestamp and name on the text's first line.
-        HStack(alignment: StressLayout.oldLayout ? .firstTextBaseline : .top, spacing: 8) {
-            Text(Recorder.timestamp(row.start))
-                .font(.system(size: size - 2).monospacedDigit())
-                .foregroundStyle(.tertiary)
-                .padding(.top, 2)
-            speaker
-                .frame(width: 90 * size / ReadingPrefs.standard, alignment: .leading)
-                .padding(.top, 1)
+        // every layout pass, which (with live resizing) froze 0.8.1.
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 6) {
+                speaker
+                Text(Recorder.timestamp(row.start))
+                    .font(.system(size: labelSize).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                marker
+                    .font(.system(size: labelSize))
+            }
             text
                 .font(.system(size: size))
                 .foregroundStyle(row.isFinal && !row.unclear ? .primary : .secondary)
@@ -575,21 +662,6 @@ struct LineView: View {
                 // Only finished lines can be selected: the live line changes
                 // several times a second, and its selection view with it.
                 .selectable(row.isFinal && !StressLayout.oldLayout)
-            if row.incomplete {
-                Image(systemName: "exclamationmark.bubble.fill")
-                    .foregroundStyle(.orange)
-                    .help("The speech model failed on this line; this is what it had heard so far.")
-            } else if row.possibleEcho {
-                Image(systemName: "speaker.wave.2.bubble")
-                    .foregroundStyle(.secondary)
-                    .help("This may be the call coming back through your speakers rather than you. It's kept because it isn't a clear repeat.")
-            } else if row.unclear {
-                Image(systemName: "questionmark.circle.fill")
-                    .foregroundStyle(.orange)
-                    .help(row.confidence < 1
-                          ? "Wingman wasn't sure about this line (confidence \(Int(row.confidence * 100))%). Check it against the audio."
-                          : "Wingman wasn't sure about this line. Check it against the audio.")
-            }
         }
         .padding(.vertical, emphasized ? 2 : 0)
         .background(emphasized ? color.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 4))

@@ -1,5 +1,19 @@
 # Release notes
 
+## 0.9.2 — no more freezes during calls
+
+- **Fix:** during some calls, mostly with a Bluetooth headset, Wingman could stop
+  responding for minutes, and force-quitting it broke the call's audio. The live
+  transcript kept redrawing itself while following new lines; it now follows them calmly.
+- **If Wingman ever freezes during a call anyway**, after 20 seconds it lets go of the
+  microphone and call audio so your call isn't disturbed, and takes them back when it
+  recovers. The window then says how long it wasn't listening; that stretch is missing
+  from the audio and the transcript.
+- **After a crash or force-quit during a recording**, Wingman asks before recording the
+  call that's still going, instead of starting on its own.
+- **More room for what was said:** each line's speaker and time are now on a small line
+  above the text, so the text uses the whole width of the window.
+
 ## 0.9.1 — sharing your screen no longer splits a call
 
 - **Fix:** in 0.9.0, sharing your screen in Teams (and stopping) could start a new note

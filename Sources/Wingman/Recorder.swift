@@ -891,6 +891,9 @@ final class Recorder {
         }
     }
 
+    /// Set by `resumeAfterHang` for the reconnect's notice.
+    private var resumedAfterHang: String?
+
     private enum ReconnectReason {
         case deviceChanged, micInterrupted
 
@@ -898,6 +901,18 @@ final class Recorder {
         func merged(with other: ReconnectReason?) -> ReconnectReason {
             self == .deviceChanged || other == .deviceChanged ? .deviceChanged : .micInterrupted
         }
+    }
+
+    /// The main thread was stuck long enough for the watchdog to release the
+    /// microphone and call audio (`AudioEmergencyStop`): capture comes back on
+    /// the current devices, and the note's window says what's missing.
+    func resumeAfterHang(seconds: Double) {
+        guard phase == .recording else { return }
+        let gap = seconds < 90 ? "\(Int(seconds.rounded())) seconds" : "\(Int((seconds / 60).rounded())) minutes"
+        resumedAfterHang = "Wingman stopped responding for about \(gap) and let go of the audio so your call wasn't disturbed. "
+            + "It's listening again; that stretch is missing from the audio and the transcript."
+        Log.write(String(format: "rebuilding capture after the main thread was blocked for %.0f s", seconds))
+        Task { await reconnect(reason: .deviceChanged) }
     }
 
     /// Rebuilds capture on the current devices after AirPods connect, headphones
@@ -979,7 +994,12 @@ final class Recorder {
         if !AudioDeviceMonitor.outputIsHeadphones() { current?.speakersUsed = true }
         let output = AudioDeviceMonitor.defaultOutputName() ?? "new output"
         let input = AudioDeviceMonitor.defaultInputName() ?? "new microphone"
-        current?.notice = "Audio devices changed at \(elapsed) — now listening on \(input), call audio from \(output)."
+        if let resumed = resumedAfterHang {
+            current?.notice = resumed
+            resumedAfterHang = nil
+        } else {
+            current?.notice = "Audio devices changed at \(elapsed) — now listening on \(input), call audio from \(output)."
+        }
         Log.write("reconnected capture (\(reason)) — input \(input), output \(output)")
     }
 
@@ -990,6 +1010,11 @@ final class Recorder {
 
     // MARK: - Transcribing a file
 
+    /// When this launch followed a run that ended mid-recording (a crash, or a
+    /// force quit of a hung Wingman). Calls found soon after are asked about
+    /// rather than recorded automatically (`CallWatcher.asksAfterRestart`).
+    private(set) var restartedDuringRecording: Date?
+
     /// At launch, before anything can start recording: finishes the audio of
     /// recordings Wingman didn't get to finish, then clears old scratch audio.
     func recoverInterruptedRecordings() {
@@ -997,6 +1022,8 @@ final class Recorder {
         // session writes is newer than this.
         let launched = Date()
         let records = RecordingRecovery.leftovers(in: Self.scratchFolder)
+        // A recovery record means the last run ended while recording.
+        if !records.isEmpty { restartedDuringRecording = launched }
         // Tracks a record covers are its own, not orphans.
         let covered = Set(records.flatMap(\.record.tracks).map(\.standardizedFileURL))
         let orphans = RecordingRecovery.orphanedTracks(in: Self.notesFolder).compactMap { orphan -> RecordingRecovery.Record? in

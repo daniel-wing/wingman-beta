@@ -359,6 +359,8 @@ Wingman recognizes a Meet call from what Chrome itself shows, never from the pag
   call starts. A Teams meeting you join late, straight after another call, also stays in
   the previous note.
 - Taking AirPods in and out during a call can split the meeting into two notes.
+- If Wingman freezes for 20 seconds or more during a call, it lets go of the audio so
+  the call isn't disturbed; what was said until it recovers is missing from the note.
 - For meetings recorded before 0.9, finding voices in the old audio is cautious: it often
   finds none clear enough to offer, and then only the names change.
 - If call detection can't tell whether a call is still going (rare), Wingman keeps
