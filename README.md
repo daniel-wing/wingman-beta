@@ -34,7 +34,7 @@ Wingman la lee desde la app Calendario ([pasos](#connect-your-work-calendar)).
   records automatically, or ignores it; you choose per app. Recording stops when the
   call ends. ([How Google Meet is recognized](#google-meet).) Optionally it opens when
   you log in (Settings).
-- **One note per call.** Each call gets its own note and window, even when Teams goes
+- **One note per call.** Each call gets its own note, even when Teams goes
   straight into the next call; for anything else, **New Note** starts one by hand
   (**Join with Previous** undoes a split). Sharing your screen never splits a call. A test
   call you don't need? **Delete Meeting…** moves its note and audio to the Trash.
@@ -44,8 +44,10 @@ Wingman la lee desde la app Calendario ([pasos](#connect-your-work-calendar)).
   available but untested.
 - **Knows who said what.** Your microphone is **Me**; after the call, the other side
   is split into **Them 1, Them 2…**. Click a name to rename it, or **Name Them** to go
-  through everyone still unnamed. Jumped straight into the next call? Name them later in
-  the **Meetings** window, even while the next call records. If you turn on *Recognize
+  through everyone still unnamed. Know who's talking during the call? Click "Them" on
+  their line and name them: after the call that name goes to their voice, by itself if
+  Wingman already knows them, or as *Name?* for you to confirm. Jumped straight into the next call? Name them later in
+  the **Wingman window**, even while the next call records. If you turn on *Recognize
   people* (experimental), Wingman learns voices you've named and recognizes those people
   in later meetings.
 - **Easy to read back.** **Find** (⌘F) a phrase to see who said it — capitals, accents and
@@ -66,7 +68,7 @@ Wingman la lee desde la app Calendario ([pasos](#connect-your-work-calendar)).
   and the meeting's audio (about 45 MB per hour), in a folder you can open, search and
   back up. Subtitles (`.vtt` / `.srt`) on request. Short on space? Wingman can move audio
   older than a month, or past a size you choose, to the Trash; your notes stay.
-- **Transcribes recordings too.** Drag a recording or video onto Wingman's window, or
+- **Transcribes recordings too.** Drag a recording or video onto the Wingman window, or
   use menu bar → **Transcribe a Recording…**
 
 ## How it works
@@ -255,9 +257,25 @@ permissions stay.
 
 After setup, Wingman lives in the **menu bar** at the top of the screen, near the
 clock: a small **W** made of audio bars, which turns into a record symbol while
-recording. It has no Dock icon unless its window is open. On MacBooks with a notch, a full menu bar can
+recording. It has no Dock icon unless the Wingman window is open. On MacBooks with a notch, a full menu bar can
 hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space, type
-*Wingman*) and its window opens with the same controls.
+*Wingman*) and the Wingman window opens with the same controls.
+
+### The two windows
+
+- **The Wingman window** has everything: the call going on now, then your meetings of
+  the last two weeks, with how many speakers each has left to name. Choose one to read
+  it, rename it, link it to a calendar event, name its speakers, export subtitles or
+  delete it. With none chosen, it shows **Start Recording** and what Wingman does with
+  each kind of call. Open it from the menu bar icon (**Open Wingman**) or the Dock.
+- **The Live Transcript** appears by itself when a recording starts: a small, slightly
+  see-through window marked **LIVE** that floats above the call (also in full screen),
+  with Mute, New Note and Stop at the top. It never takes the focus from your call.
+  Close it to hide it: Wingman keeps recording, and **Show Live Transcript** in the menu
+  bar brings it back. The ⇕ button shrinks it to the latest line. When the call ends it
+  says *Saved* and goes away; the meeting is waiting in the Wingman window. Its
+  see-through look is in Settings → Live Transcript, and it's solid when Reduce
+  Transparency is on.
 
 ### Permissions
 
@@ -265,7 +283,7 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
 |---|---|---|
 | System audio | Hears the other people on the call. macOS lists it under *Screen & System Audio Recording*, but Wingman records sound only, never your screen. | Needed |
 | Microphone | Hears you | Needed |
-| Notifications | Asks *Record this call?* and shows a Stop button. Without it, Wingman opens its window instead. | Recommended |
+| Notifications | Asks *Record this call?* and shows a Stop button. Without it, Wingman opens the Wingman window instead. | Recommended |
 | Calendar | Names meetings and lists invitees. Only reads, from the calendars in the Mac's Calendar app — no Microsoft or Google sign-in ([work calendar](#connect-your-work-calendar)). | Optional |
 | Accessibility | To tell a Google Meet call from other browser use: it reads Chrome's tab titles and address bar ([how](#google-meet)). And to follow your mute in the Teams or Zoom app: it reads their mute button (and asks Teams to make it readable). It never clicks or types, and saves nothing it reads. | Optional; needed for Google Meet |
 
@@ -287,20 +305,20 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
 - **Mute Wingman:** **⌃⌥M** from any app. Your voice is left out of the transcript *and*
   the audio until you press it again or quit Wingman (the menu-bar icon shows a crossed-out mic). Or
   let it follow your Teams/Zoom mute (Settings → Calls).
-- **One window per call.** Each call opens in its own window and keeps it after it
-  ends, so naming speakers in one call isn't interrupted by the next. If Teams or Zoom
+- **During a call** the Live Transcript floats over it, and a call you start naming in the
+  Wingman window isn't interrupted by the next one. If Teams or Zoom
   moves straight on to another call, Wingman starts a new note at that moment (with no
   gap in the audio) and tells you; **Join with Previous** undoes it for a minute if it
   was the same call. A meeting finishes in the background while the next one records.
 - **Delete a call you don't need** (a test, a call you won't keep): **Delete Meeting…**
-  in its window, or in Meetings, moves its note, audio and subtitles to the Trash, and
+  in the Wingman window moves its note, audio and subtitles to the Trash, and
   Wingman forgets the voices it learned from it.
 - **After a meeting:** click a speaker's name to rename them (or **Name Them** to go
   through everyone left), pick the calendar event next to the meeting name, or **Export**
   subtitles. The "Meeting saved" notification says how many speakers are left to name;
   click it to name them. Your notes and audio are one click away: menu bar icon → **Open
   Notes Folder**.
-- **Name speakers later:** menu bar icon → **Meetings…** lists the last two weeks, with how
+- **Name speakers later:** the Wingman window lists the last two weeks, with how
   many speakers each has left to name (**Open…** for older notes). It works while
   another call records. For meetings recorded before 0.9, Wingman looks for the voices in
   the meeting's call audio (if you kept it) and, for people you name, offers to learn
@@ -359,6 +377,9 @@ Wingman recognizes a Meet call from what Chrome itself shows, never from the pag
   call starts. A Teams meeting you join late, straight after another call, also stays in
   the previous note.
 - Taking AirPods in and out during a call can split the meeting into two notes.
+- Screen sharing: Wingman asks macOS to leave the Live Transcript out of what you
+  share, but some apps show it anyway. In Teams (with Accessibility on) it hides while
+  you share; with Zoom or Google Meet, close it before sharing.
 - If Wingman freezes for 20 seconds or more during a call, it lets go of the audio so
   the call isn't disturbed; what was said until it recovers is missing from the note.
 - For meetings recorded before 0.9, finding voices in the old audio is cautious: it often

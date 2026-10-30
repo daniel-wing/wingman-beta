@@ -56,6 +56,12 @@ final class Meeting: Identifiable {
     private var voiceprints: [String: [Float]] = [:]
     private(set) var voiceGuesses: [String: String] = [:]
     private(set) var recognized: Set<String> = []
+    /// Guesses that come from names the user gave lines during the call, not
+    /// from the voice library.
+    private(set) var guessFromHint: Set<String> = []
+    /// The lines have their final labels (Them 1, Them 2…): names given to
+    /// lines during the call now apply to voices.
+    private(set) var labelsFinal = false
     private var speakerIDs: [String: UUID] = [:]
     private(set) var differentVoice: DifferentVoice?
     struct DifferentVoice: Equatable {
@@ -127,7 +133,7 @@ final class Meeting: Identifiable {
                                   end: event.end, text: event.text, isFinal: event.isFinal,
                                   confidence: event.confidence)
         if let index {
-            lines[index] = line
+            lines[index] = lines[index].updated(by: line)
         } else if !event.text.isEmpty {
             let position = lines.firstIndex { $0.start > line.start } ?? lines.endIndex
             lines.insert(line, at: position)
@@ -220,6 +226,9 @@ final class Meeting: Identifiable {
             writeNote()
             await checkLanguages()
             await separateSpeakers()
+            // No separation (one remote line, or it failed): the names given
+            // during the call apply to "Them".
+            if !labelsFinal { labelsAreFinal() }
             let saved = await saveCombinedAudio()
             if let file {
                 try? FileManager.default.removeItem(at: file.scratch)
@@ -351,6 +360,7 @@ final class Meeting: Identifiable {
             for (index, voice) in zip(themIndices, numbered.voices) {
                 lines[index].voice = voice
             }
+            labelsFinal = true
             if numbered.ids.isEmpty {
                 // One remote voice: it keeps the plain "Them" label.
                 if result.voiceprints.count == 1, let only = result.voiceprints.values.first { voiceprints["Them"] = only }
@@ -500,18 +510,43 @@ final class Meeting: Identifiable {
     }
 
     /// Labels voices that match people named in earlier meetings: confident
-    /// matches by name, the rest as "Name?" for the user to confirm.
+    /// matches by name, the rest as "Name?" for the user to confirm. Names the
+    /// user gave lines during the call come first (see `NameHints`).
     private func recognizePeople() {
         let voices = recorder.voices
-        guard recorder.recognizeVoices, !voiceprints.isEmpty, !voices.people.isEmpty else { return }
+        let matching = recorder.recognizeVoices && !voiceprints.isEmpty && !voices.people.isEmpty
+        guard matching || (labelsFinal && lines.contains { $0.hint != nil }) else { return }
         let invitees = (meeting?.attendees ?? []) + [meeting?.organizer].compactMap { $0 }
         // Re-runs (e.g. after picking a calendar event) leave the user's own names alone.
         let namedByUser = Set(speakerNames.keys).subtracting(recognized)
         for label in recognized { speakerNames[label] = nil }
         recognized = []
         voiceGuesses = voiceGuesses.filter { namedByUser.contains($0.key) }
-        var known: [String] = [], unsure: [String] = []
-        for (label, match) in voices.match(voiceprints.filter { !namedByUser.contains($0.key) }, invitees: invitees) {
+        guessFromHint = []
+        let matches = matching ? voices.match(voiceprints.filter { !namedByUser.contains($0.key) }, invitees: invitees) : [:]
+
+        var parts: [String] = []
+        let hints = labelsFinal
+            ? lines.compactMap { line in line.hint.map { (label: line.label, name: $0) } }.filter { !namedByUser.contains($0.label) }
+            : []
+        let fromHints = NameHints.resolve(hints, matches: matches)
+        for (label, name) in fromHints.named {
+            // The user said so and the voice agrees: as if they'd named it.
+            rename(speaker: label, to: name)
+        }
+        for (label, name) in fromHints.toConfirm {
+            voiceGuesses[label] = name
+            guessFromHint.insert(label)
+        }
+        if !fromHints.toConfirm.isEmpty {
+            let count = fromHints.toConfirm.count
+            parts.append("You named \(count == 1 ? "a voice" : "\(count) voices") during the call: click \(fromHints.toConfirm.values.sorted().map { "\($0)?" }.joined(separator: ", ")) to confirm.")
+        }
+        parts += fromHints.notices
+
+        let hinted = Set(hints.map(\.label))
+        var known = fromHints.named.values.sorted(), unsure: [String] = []
+        for (label, match) in matches where !hinted.contains(label) {
             if match.confident {
                 speakerNames[label] = match.name
                 recognized.insert(label)
@@ -521,8 +556,7 @@ final class Meeting: Identifiable {
                 unsure.append(match.name)
             }
         }
-        var parts: [String] = []
-        if !known.isEmpty { parts.append("Recognized \(known.sorted().joined(separator: ", ")) from earlier meetings.") }
+        if !known.isEmpty { parts.insert("Recognized \(known.sorted().joined(separator: ", ")) from earlier meetings.", at: 0) }
         if !unsure.isEmpty { parts.append("Click \(unsure.sorted().map { "\($0)?" }.joined(separator: ", ")) to confirm.") }
         if !parts.isEmpty { notice = parts.joined(separator: " ") }
     }
@@ -569,6 +603,45 @@ final class Meeting: Identifiable {
 
     func isRecognized(_ label: String) -> Bool { recognized.contains(label) }
 
+    // MARK: - Naming lines during the call
+
+    /// Names who is speaking on one remote line (nil: not sure). Shown on that
+    /// line at once; it names the voice only after the call (`NameHints`).
+    /// The note keeps "Them" until then.
+    func nameLine(_ id: UUID, as name: String?) {
+        guard !labelsFinal, let index = lines.firstIndex(where: { $0.id == id }), lines[index].speaker == .them else { return }
+        lines[index].hint = name.flatMap(SpeakerName.clean)
+    }
+
+    /// The names given to lines so far, most recent first.
+    var hintNames: [String] {
+        var seen: [String] = []
+        for line in lines.reversed() {
+            guard let hint = line.hint, !seen.contains(where: { $0.caseInsensitiveCompare(hint) == .orderedSame }) else { continue }
+            seen.append(hint)
+        }
+        return seen
+    }
+
+    /// The name on screen: the user's name for the line until the voices are
+    /// named, then the voice's name.
+    func liveName(_ line: TranscriptLine) -> String {
+        if !labelsFinal, let hint = line.hint { return hint }
+        return displayName(line)
+    }
+
+    /// The lines keep the labels they have: names given to lines during the
+    /// call now name voices.
+    func labelsAreFinal() {
+        labelsFinal = true
+        guard lines.contains(where: { $0.hint != nil }) else { return }
+        recognizePeople()
+        writeNote()
+    }
+
+    /// Voices waiting for the user to confirm a "Name?".
+    var guessCount: Int { speakerLabels.filter { guess(for: $0) != nil }.count }
+
     func displayName(_ line: TranscriptLine) -> String {
         if let name = speakerNames[line.label] { return name }
         if let guess = voiceGuesses[line.label] { return "\(guess)?" }
@@ -592,6 +665,7 @@ final class Meeting: Identifiable {
         guard new != speakerNames[label] || voiceGuesses[label] != nil || recognized.contains(label) else { return }
         speakerNames[label] = new
         voiceGuesses[label] = nil
+        guessFromHint.remove(label)
         recognized.remove(label)
         // A correction: forget what this voice taught Wingman under the old name.
         if let contribution = learned.removeValue(forKey: label) { recorder.voices.undo(contribution: contribution) }

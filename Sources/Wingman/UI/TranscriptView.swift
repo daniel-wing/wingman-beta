@@ -2,210 +2,56 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// A meeting's window — recording, finishing, or done — or, without a meeting,
-/// Wingman's home window: Start Recording, transcribing a file, and how calls
-/// are handled. Each call gets its own window, so naming speakers in one isn't
-/// interrupted by the next.
-struct TranscriptView: View {
+/// One meeting in the Wingman window — recording, finishing, or done: its
+/// name and calendar event, the transcript, naming speakers, export and delete.
+struct MeetingDetailView: View {
     @Bindable var recorder: Recorder
-    /// The meeting this window shows; nil for the home window.
-    let meeting: Meeting?
+    let meeting: Meeting
     let watcher: CallWatcher
     let reporter: ProblemReporter
-    let shortcut: GlobalShortcut
     @FocusState private var nameFocused: Bool
-    @Environment(\.openSettings) private var openSettings
-    @Environment(\.openWindow) private var openWindow
     @State private var find = FindState()
     @State private var walk = SpeakerWalk()
     @State private var confirmDelete = false
 
-    /// The in-window question for a call waiting for an answer.
-    private static func recordQuestion(for call: CallSession) -> String {
-        #if !APP_STORE
-        if call.isUnsureMeet { return "Looks like a Google Meet call. Record it?" }
-        #endif
-        return "\(call.app.callTitle) detected. Record it?"
-    }
-
-    /// This window's meeting is the one being recorded.
-    private var live: Bool { meeting != nil && meeting === recorder.current }
+    /// This is the meeting being recorded.
+    private var live: Bool { meeting === recorder.current }
 
     var body: some View {
-        let rows = (meeting?.lines ?? []).map { TranscriptRow($0, meeting: meeting!) }
-        let tally = Self.tally(rows)
+        let rows = meeting.lines.map { TranscriptRow($0, meeting: meeting) }
+        let tally = SpeakerTally.of(rows)
         VStack(spacing: 0) {
-            if let meeting { header(meeting, tally) } else { home }
+            header(tally)
             Divider()
             if find.shown { FindBar(find: find, count: find.matches(in: rows).count, allWords: find.usesAllWords(in: rows)) }
-            if canRename, walk.speaker != nil, let meeting {
+            if canRename, walk.speaker != nil {
                 SpeakerBar(walk: walk, rows: rows, tally: tally, suggestions: meeting.suggestedNames,
                            rename: { meeting.rename(speaker: $0, to: $1) }, confirm: { meeting.confirmGuess(for: $0) })
             }
-            if meeting != nil { transcript(rows) } else { ScrollView { emptyState } }
-            if live { muteStatus }
+            TranscriptList(rows: rows, canRename: canRename, suggestions: meeting.suggestedNames,
+                           rename: { meeting.rename(speaker: $0, to: $1) }, confirm: { meeting.confirmGuess(for: $0) },
+                           find: find, walk: walk, live: live, hinting: meeting.labelsFinal ? nil : LineHinting(meeting)) {
+                Text(live ? "Listening…" : "")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 40)
+            }
+            if live { MuteStatusBar(recorder: recorder) }
         }
         .focusedSceneValue(\.transcriptActions, TranscriptActions(
             find: { find.open() },
             next: { find.next(find.matches(in: rows).count) },
             previous: { find.previous(find.matches(in: rows).count) }))
-        .dropDestination(for: URL.self) { urls, _ in
-            guard recorder.phase == .idle, let url = urls.first,
-                  let type = UTType(filenameExtension: url.pathExtension),
-                  FileImport.types.contains(where: { type.conforms(to: $0) })
-            else { return false }
-            Task { await recorder.transcribeFile(url) }
-            return true
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button { openWindow(id: "meetings") } label: {
-                    Label("Meetings", systemImage: "list.bullet.rectangle")
-                }
-                .help("Past meetings: name speakers after the meeting")
-                TextSizeMenu()
-                Button { FileImport.choose(for: recorder) } label: {
-                    Label("Transcribe a Recording", systemImage: "doc.badge.plus")
-                }
-                .help("Transcribe a meeting recording or video file")
-                .disabled(recorder.phase != .idle)
-                Button { Recorder.openNotesFolder() } label: {
-                    Label("Notes Folder", systemImage: "folder")
-                }
-                .help("Open the folder with all your meeting notes")
-                Button { openSettings() } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                .help("Settings (⌘,)")
-            }
-        }
         .confirmationDialog("Delete this meeting?", isPresented: $confirmDelete) {
             Button("Delete Meeting", role: .destructive) {
-                guard let meeting else { return }
                 recorder.notice = "Meeting deleted. " + recorder.delete(meeting)
             }
         } message: {
             Text("Its note, audio and subtitles go to the Trash, and Wingman forgets the voices it learned from it.")
         }
-        .onDisappear { if let meeting { recorder.windowClosed(meeting) } }
     }
 
-    // MARK: - Home
-
-    private var home: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                homeStatus
-                Spacer()
-                muteButton
-                if recorder.isRecording, let current = recorder.current {
-                    Button("Show Recording") { recorder.showMeeting?(current) }
-                        .buttonStyle(.borderedProminent)
-                } else {
-                    Button("Record") { Task { await recorder.start() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(recorder.phase != .idle)
-                }
-            }
-            if let call = watcher.pendingCall, recorder.phase == .idle {
-                HStack {
-                    Label(Self.recordQuestion(for: call), systemImage: "phone.fill")
-                    Spacer()
-                    Button("Ignore") { watcher.answerPending(record: false) }
-                    Button("Record") { watcher.answerPending(record: true) }
-                        .buttonStyle(.borderedProminent)
-                }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.12)))
-            }
-            if let status = recorder.modelStatus, recorder.phase == .idle {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(status).foregroundStyle(.secondary)
-                }
-                .font(.callout)
-            }
-            messages(notice: recorder.notice, warning: recorder.warning, error: recorder.lastError)
-        }
-        .padding(12)
-    }
-
-    @ViewBuilder private var homeStatus: some View {
-        switch recorder.phase {
-        case .idle:
-            Text("Ready").foregroundStyle(.secondary)
-        case .preparing(let message), .finishing(let message):
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(message).foregroundStyle(.secondary)
-            }
-        case .recording:
-            Label("Recording", systemImage: "record.circle.fill").foregroundStyle(.red)
-        }
-    }
-
-    /// Shown in the home window: a big Record button and what Wingman will do on its own.
-    private var emptyState: some View {
-        VStack(spacing: 14) {
-            Button {
-                Task { await recorder.start() }
-            } label: {
-                Label("Start Recording", systemImage: "record.circle")
-                    .font(.title3.weight(.semibold))
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(recorder.phase != .idle)
-            if let keys = shortcut.shortcut?.display {
-                Text("or press \(keys) from any app").font(.callout).foregroundStyle(.secondary)
-            }
-            Button("Transcribe a recording or video file…") { FileImport.choose(for: recorder) }
-                .buttonStyle(.link)
-                .disabled(recorder.phase != .idle)
-            Text("You can also drop a file here.").font(.caption).foregroundStyle(.tertiary)
-            VStack(spacing: 4) {
-                ForEach(CallApp.shown) { app in
-                    Text("\(app.name): \(summary(watcher.policy(for: app)))")
-                }
-            }
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .padding(.top, 8)
-            Text("Each call opens in its own window.").font(.caption).foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-    }
-
-    private func summary(_ policy: AutoRecordPolicy) -> String {
-        switch policy {
-        case .automatic: return "recorded automatically"
-        case .ask: return "Wingman asks first"
-        case .off: return "not recorded"
-        }
-    }
-
-    /// Speakers still to name or confirm, by label (what renaming acts on here).
-    static func tally(_ rows: [TranscriptRow]) -> SpeakerTally {
-        var tally = SpeakerTally(speakers: [], meName: nil)
-        var seen = Set<String>()
-        for row in rows where row.isFinal && !row.isMe && seen.insert(row.speakerKey).inserted {
-            if row.guess != nil {
-                tally.toConfirm.append(row.speakerKey)
-            } else if row.name == row.speakerKey {
-                tally.toName.append(row.speakerKey)
-            } else {
-                tally.named += 1
-            }
-        }
-        return tally
-    }
-
-    // MARK: - A meeting
-
-    private func header(_ meeting: Meeting, _ tally: SpeakerTally) -> some View {
+    private func header(_ tally: SpeakerTally) -> some View {
         @Bindable var meeting = meeting
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -224,14 +70,14 @@ struct TranscriptView: View {
                 MeetingDetails(meeting: event, invitees: meeting.invitees)
             }
             HStack {
-                status(meeting)
+                MeetingStatus(meeting: meeting)
                 Spacer()
                 if let note = meeting.currentNote, meeting.noteSaved {
                     Button("Show Note") { NSWorkspace.shared.activateFileViewerSelecting([note]) }
                     if meeting.stage == .done, meeting.lines.contains(where: \.isFinal) {
                         Menu("Export") {
-                            Button("Subtitles (.vtt)") { export(meeting, .vtt) }
-                            Button("Subtitles (.srt)") { export(meeting, .srt) }
+                            Button("Subtitles (.vtt)") { export(.vtt) }
+                            Button("Subtitles (.srt)") { export(.srt) }
                         }
                         .fixedSize()
                     }
@@ -243,7 +89,7 @@ struct TranscriptView: View {
                     }
                 }
                 if live {
-                    muteButton
+                    MuteButton(recorder: recorder)
                     Button("New Note") { recorder.split(reason: .user, force: true) }
                         .help("A new call started: keep recording, into a new note from now on")
                     Button("Stop") { Task { await watcher.stopRecording() } }
@@ -253,18 +99,8 @@ struct TranscriptView: View {
                         .help("Move this meeting's note and audio to the Trash — for a test or a call you don't need")
                 }
             }
-            if live, meeting.joinable {
-                HStack {
-                    Label("A new call started, so this is a new note.", systemImage: "rectangle.split.2x1")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Join with Previous") { recorder.join(meeting) }
-                        .controlSize(.small)
-                        .help("It was the same call: put this back into the previous note")
-                }
-                .font(.callout)
-            }
-            if live { recordingAlerts }
+            if live, meeting.joinable { JoinLine(recorder: recorder, meeting: meeting) }
+            if live { RecordingAlerts(recorder: recorder, watcher: watcher) }
             if canRename {
                 if tally.isDone && tally.named == 0 {
                     Text("Click a speaker's name to change it.")
@@ -284,7 +120,7 @@ struct TranscriptView: View {
                 }
                 .font(.callout)
             }
-            messages(notice: meeting.notice, warning: live ? (recorder.warning ?? meeting.warning) : meeting.warning,
+            Messages(notice: meeting.notice, warning: live ? (recorder.warning ?? meeting.warning) : meeting.warning,
                      error: meeting.lastError)
             if let error = meeting.noteSaveError {
                 HStack {
@@ -293,15 +129,215 @@ struct TranscriptView: View {
                         .font(.callout)
                         .textSelection(.enabled)
                     Spacer()
-                    Button("Save Note As…") { saveNoteAs(meeting) }
+                    Button("Save Note As…") { saveNoteAs() }
                 }
             }
         }
         .padding(12)
     }
 
-    /// Problems with capture while this meeting records.
-    @ViewBuilder private var recordingAlerts: some View {
+    private var canRename: Bool {
+        meeting.stage == .done && meeting.lines.contains(where: \.isFinal)
+    }
+
+    /// The note couldn't be saved where it belongs: keep a copy somewhere else.
+    private func saveNoteAs() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = meeting.currentNote?.lastPathComponent ?? "Meeting.md"
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try meeting.saveNoteCopy(to: url)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    private func export(_ format: SubtitleExport.Format) {
+        if let url = meeting.exportSubtitles(format) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
+}
+
+/// The Wingman window with no meeting chosen: a big Record button, transcribing
+/// a file, and what Wingman does on its own with each kind of call.
+struct HomeView: View {
+    let recorder: Recorder
+    let watcher: CallWatcher
+    let shortcut: GlobalShortcut
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                Button {
+                    Task { await recorder.start() }
+                } label: {
+                    Label("Start Recording", systemImage: "record.circle")
+                        .font(.title3.weight(.semibold))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(recorder.phase != .idle)
+                if let keys = shortcut.shortcut?.display {
+                    Text("or press \(keys) from any app").font(.callout).foregroundStyle(.secondary)
+                }
+                Button("Transcribe a recording or video file…") { FileImport.choose(for: recorder) }
+                    .buttonStyle(.link)
+                    .disabled(recorder.phase != .idle)
+                Text("You can also drop a file here.").font(.caption).foregroundStyle(.tertiary)
+                VStack(spacing: 4) {
+                    ForEach(CallApp.shown) { app in
+                        Text("\(app.name): \(Self.summary(watcher.policy(for: app)))")
+                    }
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.top, 8)
+                Text("During a call, the Live Transcript floats over it. Meetings stay here afterwards.")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 60)
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private static func summary(_ policy: AutoRecordPolicy) -> String {
+        switch policy {
+        case .automatic: return "recorded automatically"
+        case .ask: return "Wingman asks first"
+        case .off: return "not recorded"
+        }
+    }
+}
+
+/// What needs an answer or attention whatever is chosen in the Wingman window:
+/// a call waiting for "Record it?", the speech models getting ready, and
+/// Wingman's own notices and errors.
+struct WingmanBanner: View {
+    let recorder: Recorder
+    let watcher: CallWatcher
+
+    /// The question for a call waiting for an answer.
+    private static func recordQuestion(for call: CallSession) -> String {
+        #if !APP_STORE
+        if call.isUnsureMeet { return "Looks like a Google Meet call. Record it?" }
+        #endif
+        return "\(call.app.callTitle) detected. Record it?"
+    }
+
+    var isEmpty: Bool {
+        !(watcher.pendingCall != nil && recorder.phase == .idle)
+            && !(recorder.modelStatus != nil && recorder.phase == .idle)
+            && recorder.notice == nil && recorder.warning == nil && recorder.lastError == nil
+    }
+
+    var body: some View {
+        if !isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                if let call = watcher.pendingCall, recorder.phase == .idle {
+                    HStack {
+                        Label(Self.recordQuestion(for: call), systemImage: "phone.fill")
+                        Spacer()
+                        Button("Ignore") { watcher.answerPending(record: false) }
+                        Button("Record") { watcher.answerPending(record: true) }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.12)))
+                }
+                if let status = recorder.modelStatus, recorder.phase == .idle {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(status).foregroundStyle(.secondary)
+                    }
+                    .font(.callout)
+                }
+                Messages(notice: recorder.notice, warning: recorder.isRecording ? nil : recorder.warning,
+                         error: recorder.lastError)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Divider()
+        }
+    }
+}
+
+// MARK: - Pieces shared with the Live Transcript
+
+/// Recording (with its timer), finishing (with what's being done), or saved.
+struct MeetingStatus: View {
+    let meeting: Meeting
+
+    var body: some View {
+        switch meeting.stage {
+        case .recording:
+            if let start = meeting.startedAt {
+                Label {
+                    Text(start, style: .timer).monospacedDigit()
+                } icon: {
+                    Image(systemName: "record.circle.fill").foregroundStyle(.red)
+                }
+            }
+        case .finishing(let message):
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(message).foregroundStyle(.secondary)
+            }
+        case .done:
+            Text("Saved").foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Wingman's own mute only. A mute followed from Teams/Zoom shows in the
+/// mute status line (with "Transcribe me anyway"); mixing the two here made a
+/// click meant to unmute switch Wingman's own mute on instead.
+struct MuteButton: View {
+    @Bindable var recorder: Recorder
+
+    var body: some View {
+        Button {
+            recorder.micMuted.toggle()
+        } label: {
+            Image(systemName: recorder.micMuted ? "mic.slash.fill" : "mic.fill")
+                .foregroundStyle(recorder.micMuted ? Color.orange : Color.primary)
+        }
+        .help(recorder.micMuted ? "Unmute your microphone in Wingman" : "Mute your microphone in Wingman — e.g. while playing a recorded call")
+        .accessibilityLabel(recorder.micMuted ? "Unmute microphone" : "Mute microphone")
+        .accessibilityValue(recorder.micMuted ? "Your microphone is muted in Wingman" : "Your microphone is being transcribed")
+    }
+}
+
+/// "A new call started, so this is a new note", with the way back.
+struct JoinLine: View {
+    let recorder: Recorder
+    let meeting: Meeting
+
+    var body: some View {
+        HStack {
+            Label("A new call started, so this is a new note.", systemImage: "rectangle.split.2x1")
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Join with Previous") { recorder.join(meeting) }
+                .controlSize(.small)
+                .help("It was the same call: put this back into the previous note")
+        }
+        .font(.callout)
+    }
+}
+
+/// Problems with capture while a meeting records.
+struct RecordingAlerts: View {
+    let recorder: Recorder
+    let watcher: CallWatcher
+
+    var body: some View {
         if recorder.systemMuted && !recorder.micMuted {
             HStack {
                 Label("macOS has muted Wingman's microphone — for example with an AirPods press. Your words aren't being transcribed.", systemImage: "mic.slash.fill")
@@ -332,8 +368,15 @@ struct TranscriptView: View {
                 .foregroundStyle(.secondary)
         }
     }
+}
 
-    @ViewBuilder private func messages(notice: String?, warning: String?, error: String?) -> some View {
+/// A notice, a warning and an error, each when there is one.
+struct Messages: View {
+    let notice: String?
+    let warning: String?
+    let error: String?
+
+    var body: some View {
         if let notice {
             Label(notice, systemImage: "arrow.triangle.2.circlepath")
                 .foregroundStyle(.secondary)
@@ -352,29 +395,35 @@ struct TranscriptView: View {
                 .textSelection(.enabled)
         }
     }
+}
 
-    /// Being muted is a state you chose, not a problem: a quiet line at the
-    /// bottom of the window, with the way around it for a comment of your own.
-    @ViewBuilder private var muteStatus: some View {
+/// Being muted is a state you chose, not a problem: a quiet line, with the way
+/// around it for a comment of your own. Nothing when you're not muted.
+struct MuteStatusBar: View {
+    let recorder: Recorder
+    /// One line, for the compact Live Transcript (the whole text on hover).
+    var compact = false
+
+    var body: some View {
         if recorder.micMuted {
-            statusBar("Your microphone is muted in Wingman — only the other side is transcribed.",
-                      icon: "mic.slash", button: "Unmute") { recorder.micMuted = false }
+            bar("Your microphone is muted in Wingman — only the other side is transcribed.",
+                icon: "mic.slash", button: "Unmute") { recorder.micMuted = false }
         } else if recorder.isRecording, let app = recorder.callMuted {
             if recorder.callMuteIgnored {
-                statusBar("Muted in \(app.shortName), but Wingman is transcribing you anyway — until you next mute or unmute there.",
-                          icon: "text.bubble", button: "Stop") { recorder.followCallMuteAgain() }
+                bar("Muted in \(app.shortName), but Wingman is transcribing you anyway — until you next mute or unmute there.",
+                    icon: "text.bubble", button: "Stop") { recorder.followCallMuteAgain() }
             } else {
-                statusBar("You're muted in \(app.shortName), so Wingman isn't transcribing you.",
-                          icon: "mic.slash", button: "Transcribe me anyway",
-                          help: "For a comment you want in the notes without unmuting in \(app.shortName)") {
+                bar("You're muted in \(app.shortName), so Wingman isn't transcribing you.",
+                    icon: "mic.slash", button: "Transcribe me anyway",
+                    help: "For a comment you want in the notes without unmuting in \(app.shortName)") {
                     recorder.transcribeDespiteCallMute()
                 }
             }
         }
     }
 
-    private func statusBar(_ text: String, icon: String, button: String, help: String? = nil,
-                           action: @escaping () -> Void) -> some View {
+    private func bar(_ text: String, icon: String, button: String, help: String? = nil,
+                     action: @escaping () -> Void) -> some View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 10) {
@@ -383,7 +432,8 @@ struct TranscriptView: View {
                 // the window's live resize keeps renegotiating.
                 Label(text, systemImage: icon)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(compact ? 1 : 2)
+                    .help(compact ? text : "")
                 Spacer(minLength: 8)
                 Button(button, action: action)
                     .controlSize(.small)
@@ -391,87 +441,16 @@ struct TranscriptView: View {
             }
             .font(.callout)
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, compact ? 5 : 8)
         }
         .background(.bar)
-    }
-
-    private var canRename: Bool {
-        guard let meeting else { return false }
-        return meeting.stage == .done && meeting.lines.contains(where: \.isFinal)
-    }
-
-    /// The note couldn't be saved where it belongs: keep a copy somewhere else.
-    private func saveNoteAs(_ meeting: Meeting) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = meeting.currentNote?.lastPathComponent ?? "Meeting.md"
-        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try meeting.saveNoteCopy(to: url)
-        } catch {
-            NSAlert(error: error).runModal()
-        }
-    }
-
-    private func export(_ meeting: Meeting, _ format: SubtitleExport.Format) {
-        if let url = meeting.exportSubtitles(format) {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        }
-    }
-
-    @ViewBuilder private func status(_ meeting: Meeting) -> some View {
-        switch meeting.stage {
-        case .recording:
-            if let start = meeting.startedAt {
-                Label {
-                    Text(start, style: .timer).monospacedDigit()
-                } icon: {
-                    Image(systemName: "record.circle.fill").foregroundStyle(.red)
-                }
-            }
-        case .finishing(let message):
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(message).foregroundStyle(.secondary)
-            }
-        case .done:
-            Text("Saved").foregroundStyle(.secondary)
-        }
-    }
-
-    /// Wingman's own mute only. A mute followed from Teams/Zoom shows in the
-    /// status bar at the bottom (with "Transcribe me anyway"); mixing the two here made a click
-    /// meant to unmute switch Wingman's own mute on instead.
-    private var muteButton: some View {
-        Button {
-            recorder.micMuted.toggle()
-        } label: {
-            Image(systemName: recorder.micMuted ? "mic.slash.fill" : "mic.fill")
-                .foregroundStyle(recorder.micMuted ? Color.orange : Color.primary)
-        }
-        .help(recorder.micMuted ? "Unmute your microphone in Wingman" : "Mute your microphone in Wingman — e.g. while playing a recorded call")
-        .accessibilityLabel(recorder.micMuted ? "Unmute microphone" : "Mute microphone")
-        .accessibilityValue(recorder.micMuted ? "Your microphone is muted in Wingman" : "Your microphone is being transcribed")
-    }
-
-    private func transcript(_ rows: [TranscriptRow]) -> some View {
-        TranscriptList(rows: rows, canRename: canRename, suggestions: meeting?.suggestedNames ?? [],
-                       rename: { meeting?.rename(speaker: $0, to: $1) }, confirm: { meeting?.confirmGuess(for: $0) },
-                       find: find, walk: walk, live: live) {
-            Text(live ? "Listening…" : "")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, 40)
-        }
     }
 }
 
 /// Chooses which calendar event this meeting belongs to: today's meetings,
 /// nearest to now first, or none. Shows the attached event, so it's clear
 /// where the name and invitees come from.
-private struct CalendarEventMenu: View {
+struct CalendarEventMenu: View {
     let recorder: Recorder
     let meeting: Meeting
     @State private var meetings: [MeetingInfo] = []
@@ -593,5 +572,24 @@ private struct MeetingDetails: View {
             }
         }
         .font(.caption)
+    }
+}
+
+extension SpeakerTally {
+    /// Speakers of a meeting in memory still to name or confirm, by label
+    /// (what renaming acts on there).
+    static func of(_ rows: [TranscriptRow]) -> SpeakerTally {
+        var tally = SpeakerTally(speakers: [], meName: nil)
+        var seen = Set<String>()
+        for row in rows where row.isFinal && !row.isMe && seen.insert(row.speakerKey).inserted {
+            if row.guess != nil {
+                tally.toConfirm.append(row.speakerKey)
+            } else if row.name == row.speakerKey {
+                tally.toName.append(row.speakerKey)
+            } else {
+                tally.named += 1
+            }
+        }
+        return tally
     }
 }

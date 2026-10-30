@@ -48,6 +48,10 @@ final class CallMuteMonitor {
         }
     }
     private(set) var status: Status = .off
+    /// The screen is being shared in the Teams call being recorded (Teams
+    /// shows its "Sharing control bar" window then), so the Live Transcript
+    /// can step aside. False when it can't be told.
+    private(set) var screenSharing = false
     /// Tells the user when following stops working (a lasting problem, once per
     /// recording), since the transcript window is usually closed during a call;
     /// called with nil when it works again.
@@ -102,10 +106,12 @@ final class CallMuteMonitor {
             }
             _ = await probe.read(app)
             if await probe.takeNewCall() { recorder.split(reason: .newCall) }
+            setSharing(await probe.isSharing())
             settle(.off, problem: nil)
             return .seconds(2)
         }
         guard enabled, recorder.isRecording else {
+            setSharing(false)
             settle(enabled ? .waitingForCall : .off, problem: nil)
             return .seconds(1)
         }
@@ -136,6 +142,7 @@ final class CallMuteMonitor {
 
         let reading = await probe.read(app)
         if await probe.takeNewCall() { recorder.split(reason: .newCall) }
+        setSharing(await probe.isSharing())
         switch reading {
         case .state(let muted):
             misses = 0
@@ -207,6 +214,12 @@ final class CallMuteMonitor {
         }
     }
 
+    private func setSharing(_ sharing: Bool) {
+        guard sharing != screenSharing else { return }
+        screenSharing = sharing
+        Log.write(sharing ? "screen sharing in Teams: Live Transcript hidden" : "screen sharing in Teams ended")
+    }
+
     private func clearProblem() {
         recorder.callMuteProblem = nil
         if problemSince != nil, toldRecording != nil { onProblem?(nil) }
@@ -248,12 +261,19 @@ actor AXProbe {
     private var pid: pid_t = 0
     private var triedWebAccessibility = false
     private var timeoutSet = false
+    /// Teams' "Sharing control bar" window was there at the last look.
+    private var sharing = false
+    private var sharingReadAt = Date.distantPast
 
     func reset() {
         control = nil
         forgetTimer()
         triedWebAccessibility = false
+        sharing = false
     }
+
+    /// Whether the screen is being shared in Teams, as of the last look.
+    func isSharing() -> Bool { sharing }
 
     /// A new recording starts from no timer: the previous call's says nothing about it.
     func forgetTimer() {
@@ -269,8 +289,32 @@ actor AXProbe {
 
     func read(_ app: CallApp) -> Reading {
         let reading = readMute(app)
-        if app == .teams { checkTimer() }
+        if app == .teams {
+            checkTimer()
+            checkSharing()
+        } else {
+            sharing = false
+        }
         return reading
+    }
+
+    /// Every couple of seconds: while sharing, Teams opens a small window
+    /// titled "Sharing control bar" (seen in English Teams; in other languages
+    /// this may not be recognized, and then nothing is hidden).
+    private func checkSharing() {
+        let now = Date()
+        guard now.timeIntervalSince(sharingReadAt) >= 2 else { return }
+        sharingReadAt = now
+        guard let pid = AXTree.pid(for: .teams) else {
+            sharing = false
+            return
+        }
+        let windows = (AXTree.value(AXUIElementCreateApplication(pid), kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        sharing = windows.contains { AXTree.string($0, kAXTitleAttribute).map(Self.isSharingBar) ?? false }
+    }
+
+    static func isSharingBar(_ title: String) -> Bool {
+        title.lowercased().contains("sharing control bar")
     }
 
     /// Every couple of seconds, the timer in the toolbar of the window holding

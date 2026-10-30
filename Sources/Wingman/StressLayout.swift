@@ -18,7 +18,7 @@ enum StressLayout {
     }()
 
     #if !NO_DIAGNOSTICS
-    static func run(recorder: Recorder, seconds: Double, showWindow: () -> Void) {
+    static func run(recorder: Recorder, seconds: Double) {
         let meeting = recorder.stressMeeting()
         recorder.showMeeting?(meeting)
         recorder.stressFill(lines: 50)
@@ -41,7 +41,7 @@ enum StressLayout {
                 if tick % 20 == 0 { recorder.stressPartial(tick: tick / 20) }
                 // -WingmanStressManual: lines only; a person drags the window edge.
                 guard !UserDefaults.standard.bool(forKey: "WingmanStressManual"),
-                      let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("meeting") == true }) else { return }
+                      let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.identifier?.rawValue == "live-transcript" }) else { return }
                 var frame = window.frame
                 frame.size.width = 520 + 300 * (0.5 + 0.5 * sin(elapsed * 2.5))
                 frame.size.height = 520 + 160 * (0.5 + 0.5 * cos(elapsed * 1.7))
@@ -99,8 +99,8 @@ enum StressLayout {
         // -WingmanStressMinimize: minimized a few seconds in, as during a call.
         if UserDefaults.standard.bool(forKey: "WingmanStressMinimize") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("meeting") == true }?.miniaturize(nil)
-                Log.write("stress: window minimized")
+                NSApp.windows.first { $0.identifier?.rawValue == "live-transcript" }?.orderOut(nil)
+                Log.write("stress: Live Transcript hidden")
             }
         }
     }
@@ -109,7 +109,7 @@ enum StressLayout {
     /// events — AppKit's live-resize loop, as a person's drag — from a background
     /// thread, so the drag ends (mouse up) even if the main thread freezes.
     static func dragCorner(seconds: Double) {
-        guard let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("meeting") == true }),
+        guard let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.identifier?.rawValue == "live-transcript" }),
               let screen = window.screen ?? NSScreen.main else { return }
         window.makeKeyAndOrderFront(nil)
         // Away from the screen's edges, so the corner can be dragged both ways.

@@ -1,5 +1,25 @@
 # Release notes
 
+## 0.10.0 — one Wingman window, and a Live Transcript over your call
+
+- **Two windows instead of three.** The **Wingman window** has everything: the call going
+  on now, then your meetings of the last two weeks, and for each one its transcript,
+  name, calendar event, speakers to name, export and delete. It replaces the old home
+  window, the Meetings window and the window each call used to open.
+- **The Live Transcript** appears by itself when a recording starts: a small,
+  slightly see-through window marked **LIVE** that floats above the call, also in full
+  screen, with Mute, New Note and Stop at the top. It doesn't take the focus from your
+  call. Close it to hide it; Wingman keeps recording, and **Show Live Transcript** in the
+  menu bar brings it back. The ⇕ button shrinks it to the latest line. When the call ends
+  it says *Saved* and goes away, and the meeting waits in the Wingman window.
+- **Sharing your screen in Teams** hides the Live Transcript until you stop (Settings →
+  Live Transcript). With Zoom or Google Meet, close it before you share.
+- **Name who's speaking during the call.** Click "Them" on a line and pick or type a
+  name. After the call Wingman checks the voice: someone it already knows is named by
+  itself; anyone new waits as *Name?* for one click to confirm.
+- Settings → Live Transcript: how see-through it is. It's always solid with Reduce
+  Transparency or Increase Contrast on.
+
 ## 0.9.2 — no more freezes during calls
 
 - **Fix:** during some calls, mostly with a Bluetooth headset, Wingman could stop

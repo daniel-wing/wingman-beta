@@ -24,7 +24,7 @@ final class MainThreadWatchdog: @unchecked Sendable {
         var liveResize = false
         var lines = 0
         var recording = false
-        /// Each meeting window's state: "visible", "covered", "minimized",
+        /// The Live Transcript's and the Wingman window's state: "visible", "covered", "minimized",
         /// "hidden" or "other space"; "none" without one.
         var meetingWindow = "none"
     }
@@ -132,10 +132,13 @@ final class MainThreadWatchdog: @unchecked Sendable {
     @MainActor
     static func currentContext(lines: Int, recording: Bool) -> Context {
         let key = NSApp.keyWindow
-        let meetings = NSApp.windows.filter { $0.identifier?.rawValue.hasPrefix("meeting") == true }
+        // The windows that show a transcript: the Live Transcript and the Wingman window.
+        let shown = ["live-transcript", "wingman"].compactMap { id in
+            NSApp.windows.first { $0.identifier?.rawValue == id }.map { "\(id) \(state(of: $0))" }
+        }
         return Context(window: key?.identifier?.rawValue ?? (key == nil ? "none" : "other"),
                        liveResize: NSApp.windows.contains { $0.inLiveResize }, lines: lines, recording: recording,
-                       meetingWindow: meetings.isEmpty ? "none" : meetings.map(state(of:)).joined(separator: ", "))
+                       meetingWindow: shown.isEmpty ? "none" : shown.joined(separator: ", "))
     }
 
     @MainActor

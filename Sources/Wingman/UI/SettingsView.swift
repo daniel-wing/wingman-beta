@@ -146,6 +146,8 @@ struct SettingsView: View {
                 }.value
             }
 
+            LiveTranscriptSection(prefs: LivePrefs.shared)
+
             Section("Notes") {
                 LabeledContent("Saved in") {
                     Button(Recorder.notesFolder.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")) {
@@ -389,6 +391,34 @@ enum WindowPresence {
                 ($0.isVisible || $0.isMiniaturized) && $0.styleMask.contains(.titled) && !($0 is NSPanel)
             }
             if !open { NSApp.setActivationPolicy(.accessory) }
+        }
+    }
+}
+
+/// How the Live Transcript looks during a call.
+private struct LiveTranscriptSection: View {
+    @Bindable var prefs: LivePrefs
+
+    var body: some View {
+        Section {
+            LabeledContent("Opacity") {
+                HStack {
+                    Slider(value: $prefs.opacity, in: LiveLook.opacityRange)
+                        .frame(width: 160)
+                    Text("\(Int((prefs.opacity * 100).rounded())) %").monospacedDigit().frame(width: 44, alignment: .trailing)
+                }
+            }
+            #if !APP_STORE
+            Toggle("Hide it while I share my screen in Teams", isOn: $prefs.hideWhileSharing)
+            #endif
+        } header: {
+            Text("Live Transcript")
+        } footer: {
+            #if APP_STORE
+            Text("During a call the Live Transcript floats over it. It's always solid when Reduce Transparency or Increase Contrast is on in System Settings → Accessibility → Display. Close it to hide it: Wingman keeps recording, and the menu bar brings it back.")
+            #else
+            Text("During a call the Live Transcript floats over it. It's always solid when Reduce Transparency or Increase Contrast is on in System Settings → Accessibility → Display. Close it to hide it: Wingman keeps recording, and the menu bar brings it back. Hiding while sharing needs Accessibility and works with Teams only; with Zoom or Meet, close it before you share.")
+            #endif
         }
     }
 }

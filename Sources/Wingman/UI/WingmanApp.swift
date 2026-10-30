@@ -7,49 +7,26 @@ struct WingmanApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuContent(recorder: delegate.recorder, watcher: delegate.watcher, reporter: delegate.reporter,
-                        muteShortcut: delegate.muteShortcut, updates: delegate.updatesForUI)
+                        muteShortcut: delegate.muteShortcut, live: delegate.live, openWingman: { delegate.openWingman?() },
+                        updates: delegate.updatesForUI)
         } label: {
             MenuBarLabel(delegate: delegate)
         }
 
-        Window("Wingman", id: "transcript") {
-            TranscriptView(recorder: delegate.recorder, meeting: nil, watcher: delegate.watcher, reporter: delegate.reporter,
-                           shortcut: delegate.shortcut)
-                .frame(minWidth: 420, minHeight: 360)
-                .onAppear { WindowPresence.windowOpened() }
-                .onDisappear { WindowPresence.windowClosed() }
-        }
-        .defaultSize(width: 560, height: 640)
-        .defaultLaunchBehavior(.suppressed)
-        .commands { TranscriptCommands() }
-
-        // One window per call (or transcribed file), recording, finishing or done.
-        WindowGroup("Meeting", id: "meeting", for: UUID.self) { $id in
-            Group {
-                if let id, let meeting = delegate.recorder.meeting(id: id) {
-                    TranscriptView(recorder: delegate.recorder, meeting: meeting, watcher: delegate.watcher,
-                                   reporter: delegate.reporter, shortcut: delegate.shortcut)
-                        .navigationTitle(meeting.meetingName.isEmpty ? "Meeting" : meeting.meetingName)
-                } else {
-                    ClosedMeetingWindow()
-                }
-            }
-            .frame(minWidth: 420, minHeight: 360)
-            .cascadesOverOtherWindows()
-            .onAppear { WindowPresence.windowOpened() }
-            .onDisappear { WindowPresence.windowClosed() }
-        }
-        .defaultSize(width: 560, height: 640)
-        .restorationBehavior(.disabled)
-
-        Window("Meetings", id: "meetings") {
-            MeetingsView(store: delegate.meetings, recorder: delegate.recorder)
+        // The one main window: every meeting, and everything about each.
+        // The call being recorded also floats in the Live Transcript (an
+        // AppKit panel, `LiveTranscriptController`), not a scene here.
+        Window("Wingman", id: "wingman") {
+            WingmanWindowView(recorder: delegate.recorder, watcher: delegate.watcher, reporter: delegate.reporter,
+                              shortcut: delegate.shortcut, store: delegate.meetings, nav: delegate.nav,
+                              showLive: { delegate.live.show() })
                 .frame(minWidth: 720, minHeight: 440)
                 .onAppear { WindowPresence.windowOpened() }
                 .onDisappear { WindowPresence.windowClosed() }
         }
-        .defaultSize(width: 920, height: 660)
+        .defaultSize(width: 980, height: 680)
         .defaultLaunchBehavior(.suppressed)
+        .commands { TranscriptCommands() }
 
         Window("Welcome to Wingman", id: "welcome") {
             WelcomeView(recorder: delegate.recorder, watcher: delegate.watcher, permissions: delegate.permissions,
@@ -112,6 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor let muteShortcut: GlobalShortcut
     @MainActor let reporter: ProblemReporter
     @MainActor let meetings: MeetingsStore
+    /// What the Wingman window shows.
+    @MainActor let nav = WingmanNavigation()
+    /// The floating window for the call being recorded.
+    @MainActor let live: LiveTranscriptController
     /// SIGTERM (`kill`, `killall Wingman`) turned into a normal quit.
     @MainActor private var terminateSignal: DispatchSourceSignal?
     #if !APP_STORE
@@ -139,8 +120,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reporter = ProblemReporter(watcher: watcher, recorder: recorder, permissions: permissions,
                                    followMute: { callMute.enabled })
         updates = Updates(recorder: recorder)
+        live = LiveTranscriptController(recorder: recorder, watcher: watcher, sharing: { callMute.screenSharing })
+        #endif
+        #if APP_STORE
+        live = LiveTranscriptController(recorder: recorder, watcher: watcher, sharing: { false })
         #endif
         super.init()
+        let nav = nav, live = live
+        recorder.isShown = { meeting in
+            switch nav.selection {
+            case .meeting(let id): if id == meeting.id { return true }
+            case .note(let url): if meeting.currentNote?.standardizedFileURL == url.standardizedFileURL { return true }
+            case nil: break
+            }
+            return live.isShowing(meeting)
+        }
         // Recording goes first: a voice search stops when one starts, and resumes after.
         let watcherPhase = recorder.onPhaseChange
         recorder.onPhaseChange = { old, new in
@@ -209,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainThreadWatchdog.shared.onResumedAfterRelease = { [recorder] seconds in recorder.resumeAfterHang(seconds: seconds) }
         recorder.cleanUpAudio()
         recorder.tidyMeetingData()
+        live.start()
         ReadingPrefs.shared.watchKeys()
         #if !APP_STORE
         callMute.start()
@@ -257,7 +252,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Opens the welcome guide (set by the menu-bar label, which has SwiftUI's environment).
     @MainActor var openWelcome: (() -> Void)?
-    @MainActor var openMeetings: (() -> Void)?
+    /// Opens the Wingman window and brings it forward (set the same way).
+    @MainActor var openWingman: (() -> Void)?
 
 
     @MainActor
@@ -273,14 +269,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Clicking the Dock icon, or opening Wingman again from Finder or
-    /// Spotlight while it's running, opens the main window — which has
+    /// Spotlight while it's running, opens the Wingman window — which has
     /// everything the menu-bar menu has, for when that icon is hard to find.
+    /// During a call it brings back a hidden Live Transcript instead.
     @MainActor
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !Self.welcomeCompleted {
             showWelcomeIfHidden()  // until setup is done, the app icon leads back to it
-        } else if !flag {
-            watcher.showWindow?()
+        } else if recorder.isRecording, !live.state.visible {
+            live.show()
+        } else {
+            openWingman?()
         }
         return true
     }
@@ -316,8 +315,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                               action: #selector(dockToggleMute), keyEquivalent: "")
         mute.state = recorder.micMuted ? .on : .off
         menu.addItem(mute)
-        menu.addItem(NSMenuItem(title: "Show Transcript", action: #selector(dockShowWindow), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Meetings…", action: #selector(dockMeetings), keyEquivalent: ""))
+        if recorder.isRecording {
+            menu.addItem(NSMenuItem(title: "Show Live Transcript", action: #selector(dockShowLive), keyEquivalent: ""))
+        }
+        menu.addItem(NSMenuItem(title: "Open Wingman", action: #selector(dockOpenWingman), keyEquivalent: ""))
         let transcribe = NSMenuItem(title: "Transcribe a Recording…", action: #selector(dockTranscribe), keyEquivalent: "")
         transcribe.isEnabled = recorder.phase == .idle
         menu.addItem(transcribe)
@@ -330,11 +331,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor @objc private func dockToggleRecording() { toggleRecording() }
-    @MainActor @objc private func dockShowWindow() { watcher.showWindow?() }
-    @MainActor @objc private func dockMeetings() { openMeetings?() }
+    @MainActor @objc private func dockShowLive() { live.show() }
+    @MainActor @objc private func dockOpenWingman() { openWingman?() }
     @MainActor @objc private func dockToggleMute() { recorder.micMuted.toggle() }
     @MainActor @objc private func dockTranscribe() {
-        watcher.showWindow?()
+        openWingman?()
         FileImport.choose(for: recorder)
     }
     @MainActor @objc private func dockOpenNotes() { Recorder.openNotesFolder() }
@@ -366,60 +367,69 @@ private struct MenuBarLabel: View {
     var body: some View {
         icon
             .task {
-                delegate.recorder.showMeeting = { meeting in
-                    openWindow(id: "meeting", value: meeting.id)
-                    NSApp.activate()
-                }
-                delegate.recorder.closeMeeting = { meeting in
-                    dismissWindow(id: "meeting", value: meeting.id)
-                }
-                // The meeting recording (or the latest one), else the home window.
-                delegate.watcher.showWindow = { [weak delegate] in
-                    if let meeting = delegate?.recorder.focus {
-                        delegate?.recorder.showMeeting?(meeting)
-                        return
-                    }
-                    openWindow(id: "transcript")
+                let nav = delegate.nav, live = delegate.live
+                let openWingman = {
+                    openWindow(id: "wingman")
                     NSApp.activate()
                     // Activation isn't guaranteed when another app is in front
                     // (e.g. the call itself), so also order the window front.
                     DispatchQueue.main.async {
-                        NSApp.windows.first { $0.identifier?.rawValue == "transcript" }?.orderFrontRegardless()
+                        NSApp.windows.first { $0.identifier?.rawValue == "wingman" }?.orderFrontRegardless()
+                    }
+                }
+                delegate.openWingman = openWingman
+                // A recording (or a split) shows in the Live Transcript by
+                // itself, and in the Wingman window only if it's open and
+                // showing nothing else; a transcribed file opens the window.
+                delegate.recorder.showMeeting = { [weak delegate] meeting in
+                    if meeting === delegate?.recorder.current {
+                        nav.follow(meeting.id)
+                    } else {
+                        nav.show(.meeting(meeting.id))
+                        openWingman()
+                    }
+                }
+                delegate.recorder.closeMeeting = { meeting in nav.forget(meeting.id) }
+                live.openInWingman = { id in
+                    nav.show(.meeting(id))
+                    openWingman()
+                }
+                // A call prompt or a notification: the Live Transcript during
+                // a recording, else the Wingman window.
+                delegate.watcher.showWindow = { [weak delegate] in
+                    if delegate?.recorder.isRecording == true {
+                        live.show()
+                    } else {
+                        openWingman()
                     }
                 }
                 delegate.openSettings = {
                     openSettings()
                     NSApp.activate()
                 }
-                // A "Meeting saved" banner: the meeting in the Wingman window if
-                // it's still there, otherwise in Meetings.
+                // A "Meeting saved" banner: that meeting in the Wingman window.
                 delegate.notifier.onOpenNote = { [weak delegate] note in
                     guard let delegate else { return }
                     if let open = delegate.recorder.openMeeting(note: note) {
-                        delegate.recorder.showMeeting?(open)
+                        nav.show(.meeting(open.id))
                     } else {
-                        delegate.meetings.requested = note
-                        openWindow(id: "meetings")
-                        NSApp.activate()
+                        nav.show(.note(note))
                     }
+                    openWingman()
                 }
                 delegate.openWelcome = {
                     openWindow(id: "welcome")
                     NSApp.activate()
                 }
-                delegate.openMeetings = {
-                    openWindow(id: "meetings")
-                    NSApp.activate()
-                }
                 #if !NO_DIAGNOSTICS
                 // Development: `open -a Wingman --args -WingmanOpenMeetings <note path>`
-                // opens Meetings on that note, to check the window without clicking.
+                // opens the Wingman window on that note, to check it without clicking.
                 let stress = UserDefaults.standard.double(forKey: "WingmanStress")
-                if stress > 0 { StressLayout.run(recorder: delegate.recorder, seconds: stress) { delegate.watcher.showWindow?() } }
+                if stress > 0 { StressLayout.run(recorder: delegate.recorder, seconds: stress) }
                 if UserDefaults.standard.bool(forKey: "WingmanHangTest") { HangTest.run(recorder: delegate.recorder) }
                 if let note = UserDefaults.standard.string(forKey: "WingmanOpenMeetings") {
-                    if !note.isEmpty { delegate.meetings.requested = URL(fileURLWithPath: note) }
-                    openWindow(id: "meetings")
+                    if !note.isEmpty { nav.show(.note(URL(fileURLWithPath: note))) }
+                    openWingman()
                 }
                 #endif
             }
@@ -496,6 +506,8 @@ private struct MenuContent: View {
     let watcher: CallWatcher
     let reporter: ProblemReporter
     let muteShortcut: GlobalShortcut
+    let live: LiveTranscriptController
+    let openWingman: () -> Void
     /// The updater (absent in App Store builds).
     var updates: AnyObject? = nil
     @Environment(\.openWindow) private var openWindow
@@ -508,20 +520,18 @@ private struct MenuContent: View {
             }
             Button("Stop Recording") { Task { await watcher.stopRecording() } }
             Button("New Note for a New Call") { recorder.split(reason: .user, force: true) }
-        } else {
-            Button("Start Recording") {
-                showWindow()
-                Task { await recorder.start() }
+            Button("Show Live Transcript") { live.show() }
+            Button("Move Live Transcript Back to the Corner") {
+                live.show()
+                live.restorePosition()
             }
-            .disabled(recorder.phase != .idle)
+        } else {
+            Button("Start Recording") { Task { await recorder.start() } }
+                .disabled(recorder.phase != .idle)
         }
-        Button("Show Transcript") { showWindow() }
-        Button("Meetings…") {
-            openWindow(id: "meetings")
-            NSApp.activate()
-        }
+        Button("Open Wingman") { openWingman() }
         Button("Transcribe a Recording…") {
-            showWindow()
+            openWingman()
             FileImport.choose(for: recorder)
         }
         .disabled(recorder.phase != .idle)
@@ -569,10 +579,5 @@ private struct MenuContent: View {
         Divider()
         Button("Quit Wingman") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
-    }
-
-    private func showWindow() {
-        openWindow(id: "transcript")
-        NSApp.activate()
     }
 }

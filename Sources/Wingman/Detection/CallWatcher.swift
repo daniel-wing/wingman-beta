@@ -418,7 +418,7 @@ final class CallWatcher {
         if meeting.noteSaved {
             let name = meeting.meetingName.trimmingCharacters(in: .whitespaces)
             let rows = meeting.lines.map { TranscriptRow($0, meeting: meeting) }
-            notifier.announceSaved(name.isEmpty ? "Meeting" : name, toName: TranscriptView.tally(rows).toName.count,
+            notifier.announceSaved(name.isEmpty ? "Meeting" : name, toName: SpeakerTally.of(rows).toName.count,
                                    note: note, warning: meeting.warning)
         } else {
             notifier.announceNotSaved()

@@ -26,6 +26,16 @@ struct TranscriptLine: Identifiable, Equatable {
     /// Your line looks like the call's audio coming back through the speakers,
     /// but not clearly enough to drop it.
     var possibleEcho = false
+    /// Who the user said is speaking, during the call (see `NameHints`).
+    var hint: String?
+
+    /// This line after a newer version of it arrives (a partial or the final):
+    /// what the user said about the line stays.
+    func updated(by line: TranscriptLine) -> TranscriptLine {
+        var new = line
+        new.hint = hint
+        return new
+    }
 
     var isUnclear: Bool {
         isFinal && !rechecked && confidence < Self.unclearBelow && text.split(whereSeparator: \.isWhitespace).count > 1
@@ -477,12 +487,13 @@ final class Recorder {
     var recordingID: UUID? { current?.recordingID }
     var startedAt: Date? { current?.startedAt }
 
-    /// The meeting with a window whose note is `url`, if any.
+    /// The meeting in memory whose note is `url`, if any.
     func openMeeting(note url: URL) -> Meeting? {
         meetings.first { $0.currentNote?.standardizedFileURL == url.standardizedFileURL }
     }
 
-    /// Meetings with a window: recording, finishing, or done and still open.
+    /// Meetings in memory: recording, finishing, or done recently (the
+    /// Wingman window shows these from memory and older ones from their notes).
     private(set) var meetings: [Meeting] = []
     /// The meeting being recorded.
     private(set) var current: Meeting?
@@ -492,20 +503,25 @@ final class Recorder {
     /// Meetings that still take transcript lines, in recording order: the one
     /// being recorded and, for a minute after a split, the one before it.
     private var capturing: [Meeting] = []
-    /// Opens a meeting's window (set by the app).
+    /// A meeting started, split off or came back: show it (set by the app).
     var showMeeting: ((Meeting) -> Void)?
-    /// Closes a meeting's window (set by the app).
+    /// A meeting went away (discarded, deleted, joined): stop showing it (set by the app).
     var closeMeeting: ((Meeting) -> Void)?
+    /// Whether a meeting is on screen, so it isn't forgotten (set by the app).
+    var isShown: ((Meeting) -> Bool)?
     /// A new call was split off a running recording (for the notification).
     var onSplit: ((Meeting) -> Void)?
 
     func meeting(id: UUID) -> Meeting? { meetings.first { $0.id == id } }
 
-    /// A meeting's window was closed: once it's done it needn't stay in memory
-    /// (Meetings has it from its note).
-    func windowClosed(_ meeting: Meeting) {
-        guard meeting.stage == .done, meeting !== current else { return }
-        forget(meeting)
+    /// How many done meetings stay in memory, with everything they offer
+    /// (calendar, export, renaming the meeting); older ones open from their note.
+    static let doneKept = 8
+
+    /// Forgets done meetings beyond the newest `doneKept`, unless one is on screen.
+    func trimDone() {
+        let done = meetings.filter { $0.stage == .done && $0 !== current }
+        for meeting in done.dropLast(Self.doneKept) where isShown?(meeting) != true { forget(meeting) }
     }
 
     private func forget(_ meeting: Meeting) {
@@ -517,6 +533,7 @@ final class Recorder {
     func meetingFinished(_ meeting: Meeting) {
         cleanUpAudio()
         onMeetingDone?(meeting)
+        trimDone()
     }
 
     /// Told when a meeting is done (for the saved notification).

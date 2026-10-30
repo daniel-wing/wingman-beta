@@ -354,7 +354,7 @@ final class VoiceLibrary {
 
     /// "Ana López" matches an invitee listed as "Ana López", "ana lópez" or
     /// "Ana López (Marketing)"; a first name alone matches only if it's a whole word.
-    private nonisolated static func sameName(_ invitee: String, _ name: String) -> Bool {
+    nonisolated static func sameName(_ invitee: String, _ name: String) -> Bool {
         let a = invitee.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
         let b = name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
         if a == b { return true }

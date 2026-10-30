@@ -3,8 +3,9 @@ import AVFoundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The last two weeks of notes, for naming speakers after the meeting — also
-/// while another call records, since it never touches the recording.
+/// The last two weeks of notes, listed in the Wingman window for naming
+/// speakers after the meeting — also while another call records, since it
+/// never touches the recording.
 @MainActor
 @Observable
 final class MeetingsStore {
@@ -81,156 +82,6 @@ final class MeetingsStore {
     }
 }
 
-struct MeetingsView: View {
-    let store: MeetingsStore
-    let recorder: Recorder
-    @State private var selection: URL?
-    @State private var onlyToName = false
-    @State private var dropRefused = false
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260)
-        } detail: {
-            if let selection {
-                if let open = recorder.openMeeting(note: selection) {
-                    inWingmanWindow(open)
-                } else {
-                    PastMeetingDetail(url: selection, recorder: recorder, store: store)
-                        .id(selection)
-                }
-            } else {
-                ContentUnavailableView("Choose a Meeting", systemImage: "person.2.wave.2",
-                                       description: Text("Name the speakers of meetings from the last two weeks, or open an older note."))
-            }
-        }
-        .task { await store.refresh() }
-        .onChange(of: store.requested, initial: true) {
-            if let url = store.requested {
-                selection = url
-                store.requested = nil
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
-            Task { await store.refresh() }
-        }
-        .onChange(of: recorder.phase) { if recorder.phase == .idle { Task { await store.refresh() } } }
-        // A note dropped from Finder opens like one chosen with Open….
-        .dropDestination(for: URL.self) { urls, _ in
-            guard urls.count == 1, let url = urls.first, url.isFileURL, url.pathExtension.lowercased() == "md" else {
-                dropRefused = true
-                return false
-            }
-            selection = url
-            return true
-        }
-        .alert("Only a Wingman note can be opened here", isPresented: $dropRefused) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Drop one meeting note (a .md file from your notes folder) to open it in Meetings.")
-        }
-        // A meeting deleted here (or its note removed elsewhere) leaves the detail.
-        .onChange(of: store.entries.map(\.url)) {
-            if let selection, !FileManager.default.fileExists(atPath: selection.path) { self.selection = nil }
-        }
-    }
-
-    private var sidebar: some View {
-        let shown = store.entries.filter { !onlyToName || !$0.tally.isDone }
-        let days = Dictionary(grouping: shown, by: \.day).sorted { $0.key > $1.key }
-        return List(selection: $selection) {
-            ForEach(days, id: \.key) { day, entries in
-                Section(Self.dayTitle(day)) {
-                    ForEach(entries) { entry in
-                        row(entry).tag(entry.url)
-                    }
-                }
-            }
-        }
-        .overlay {
-            if shown.isEmpty, !store.scanning {
-                ContentUnavailableView(onlyToName ? "Everyone's Named" : "No Meetings",
-                                       systemImage: onlyToName ? "checkmark.circle" : "tray",
-                                       description: Text(onlyToName ? "No meeting in the last two weeks has speakers to name."
-                                                         : "Meetings from the last two weeks show here."))
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Toggle("Only to name", isOn: $onlyToName).toggleStyle(.checkbox)
-                Spacer()
-                Button("Open…") { openOlder() }
-                    .help("Open an older meeting note")
-            }
-            .padding(8)
-            .background(.bar)
-        }
-    }
-
-    private func row(_ entry: MeetingsStore.Entry) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.title).lineLimit(1)
-                if let time = entry.time {
-                    Text(time.formatted(date: .omitted, time: .shortened)).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            badge(entry)
-        }
-    }
-
-    @ViewBuilder private func badge(_ entry: MeetingsStore.Entry) -> some View {
-        if let open = recorder.openMeeting(note: entry.url) {
-            Text(open.isRecording ? "Recording…" : "Open in its window")
-                .font(.caption).foregroundStyle(open.isRecording ? .red : .secondary)
-        } else if entry.readOnly != nil {
-            Image(systemName: "lock").foregroundStyle(.secondary).help("This note can't be changed: \(entry.readOnly!.reason).")
-        } else if !entry.tally.toName.isEmpty {
-            Text("\(entry.tally.toName.count) to name").font(.caption.weight(.medium))
-                .padding(.horizontal, 6).padding(.vertical, 1)
-                .background(Capsule().fill(Color.orange.opacity(0.2)))
-        } else if !entry.tally.toConfirm.isEmpty {
-            Text("\(entry.tally.toConfirm.count) to confirm").font(.caption)
-                .padding(.horizontal, 6).padding(.vertical, 1)
-                .background(Capsule().fill(Color.secondary.opacity(0.15)))
-        } else if entry.tally.named > 0 {
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("Everyone's named")
-        }
-    }
-
-    private func inWingmanWindow(_ meeting: Meeting) -> some View {
-        ContentUnavailableView {
-            Label("This Meeting Has Its Own Window", systemImage: "macwindow")
-        } description: {
-            Text(meeting.isRecording ? "It's still recording. Name its speakers there once it's done." : "Name its speakers there.")
-        } actions: {
-            Button("Show It") { recorder.showMeeting?(meeting) }
-        }
-    }
-
-    private func openOlder() {
-        let panel = NSOpenPanel()
-        panel.directoryURL = Recorder.notesFolder
-        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        selection = url
-    }
-
-    static func dayTitle(_ day: String) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        guard let date = formatter.date(from: day) else { return day }
-        if Calendar.current.isDateInToday(date) { return "Today" }
-        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
-        return date.formatted(.dateTime.weekday(.wide).day().month(.wide))
-    }
-}
-
 /// "Learn Ana's voice from this meeting?" with a sample to listen to first.
 private struct OfferRow: View {
     let offer: PastMeeting.Offer
@@ -289,7 +140,7 @@ final class SamplePlayer {
 }
 
 /// One saved meeting: its voices, who's left to name, Find, and the transcript.
-private struct PastMeetingDetail: View {
+struct PastMeetingDetail: View {
     let url: URL
     let recorder: Recorder
     let store: MeetingsStore
@@ -415,7 +266,6 @@ private struct PastMeetingDetail: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                TextSizeMenu()
                 Button { NSWorkspace.shared.activateFileViewerSelecting([meeting.url]) } label: {
                     Label("Show Note", systemImage: "doc.text.magnifyingglass")
                 }

@@ -23,16 +23,21 @@ struct TranscriptRow: Identifiable, Equatable {
     var confidence: Float = 1
     var guess: String?
     var recognized = false
+    /// The guess comes from a name the user gave lines during the call.
+    var guessFromHint = false
+    /// The name is the user's, for this line only, during the call.
+    var hinted = false
 }
 
 extension TranscriptRow {
     /// A line of a meeting with its own window (recording, finishing or just done).
     @MainActor init(_ line: TranscriptLine, meeting: Meeting) {
-        self.init(id: line.id.uuidString, start: line.start, speakerKey: line.label, name: meeting.displayName(line),
+        self.init(id: line.id.uuidString, start: line.start, speakerKey: line.label, name: meeting.liveName(line),
                   isMe: line.speaker == .me, voice: line.voice, text: line.text, isFinal: line.isFinal,
                   unclear: line.isUnclear, incomplete: line.incomplete, possibleEcho: line.possibleEcho,
                   confidence: line.confidence, guess: meeting.guess(for: line.label),
-                  recognized: meeting.isRecognized(line.label))
+                  recognized: meeting.isRecognized(line.label), guessFromHint: meeting.guessFromHint.contains(line.label),
+                  hinted: !meeting.labelsFinal && line.hint != nil)
     }
 
     /// The lines of a saved note.
@@ -421,6 +426,26 @@ struct SpeakerBar: View {
 
 // MARK: - The list
 
+/// Naming who's speaking on one line during the call (see `NameHints`).
+struct LineHinting {
+    /// Names already given in this call, most recent first.
+    let recent: [String]
+    /// Invitees not named yet.
+    let invited: [String]
+    /// The row's id (its line's UUID) and the name; nil for "not sure".
+    let name: (String, String?) -> Void
+
+    @MainActor init(_ meeting: Meeting) {
+        let recent = meeting.hintNames
+        self.recent = recent
+        invited = meeting.suggestedNames.filter { name in !recent.contains { $0.caseInsensitiveCompare(name) == .orderedSame } }
+        name = { [weak meeting] id, name in
+            guard let id = UUID(uuidString: id) else { return }
+            meeting?.nameLine(id, as: name)
+        }
+    }
+}
+
 struct TranscriptList<Empty: View>: View {
     let rows: [TranscriptRow]
     let canRename: Bool
@@ -431,6 +456,8 @@ struct TranscriptList<Empty: View>: View {
     var walk: SpeakerWalk
     /// Follow new lines as they come (a live meeting).
     var live = false
+    /// During the call: say who's speaking on a line.
+    var hinting: LineHinting?
     @ViewBuilder var empty: () -> Empty
     private let prefs = ReadingPrefs.shared
     @State private var nearBottom = true
@@ -454,7 +481,10 @@ struct TranscriptList<Empty: View>: View {
                         LineView(row: row, size: prefs.size, canRename: canRename, suggestions: suggestions,
                                  highlights: matches.filter { $0.row == offset }.map(\.range),
                                  current: current?.row == offset ? current?.range : nil,
-                                 emphasized: walk.speaker == row.speakerKey,
+                                 emphasized: walk.speaker == row.speakerKey, hinting: hinting,
+                                 // The list holds still while a line is being named, so
+                                 // new lines don't scroll it (and its popover) away.
+                                 hintEditing: { open in frozen = open ? self.rows : nil },
                                  rename: { rename(row.speakerKey, $0) }, confirm: { confirm(row.speakerKey) })
                             .id(row.id)
                     }
@@ -476,6 +506,12 @@ struct TranscriptList<Empty: View>: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEndLiveResizeNotification)) { _ in
                 frozen = nil
+            }
+            // Opened in the middle of a call (the Live Transcript brought
+            // back, the call chosen in the Wingman window): start at the newest line.
+            .onAppear {
+                guard live, let last = rows.last else { return }
+                follower.follow(last.id) { proxy.scrollTo($0, anchor: .bottom) }
             }
             .onChange(of: rows.last?.text) {
                 // Follow only someone already at the bottom, and not while finding or naming.
@@ -571,6 +607,8 @@ struct LineView: View {
     var highlights: [Range<String.Index>] = []
     var current: Range<String.Index>?
     var emphasized = false
+    var hinting: LineHinting?
+    var hintEditing: (Bool) -> Void = { _ in }
     let rename: (String) -> Void
     let confirm: () -> Void
     @State private var editing = false
@@ -595,12 +633,14 @@ struct LineView: View {
                 .help("Rename \(row.name)")
                 .popover(isPresented: $editing, arrowEdge: .bottom) {
                     RenameSpeaker(original: row.speakerKey, current: row.name, suggestions: suggestions,
-                                  guess: row.guess, recognized: row.recognized,
+                                  guess: row.guess, guessFromHint: row.guessFromHint, recognized: row.recognized,
                                   confirm: { confirm(); editing = false }) { newName in
                         rename(newName)
                         editing = false
                     }
                 }
+        } else if let hinting, !row.isMe {
+            HintButton(row: row, hinting: hinting, editingChanged: hintEditing) { label }
         } else {
             label
         }
@@ -669,22 +709,63 @@ struct LineView: View {
     }
 }
 
-/// Popover for giving a speaker a real name. Applies to every line with that speaker.
+/// A remote line's speaker during the call: click to say who's speaking.
+struct HintButton<Label: View>: View {
+    let row: TranscriptRow
+    let hinting: LineHinting
+    var editingChanged: (Bool) -> Void = { _ in }
+    @ViewBuilder let label: () -> Label
+    @State private var editing = false
+    @State private var hovering = false
+
+    var body: some View {
+        Button { editing = true } label: {
+            label()
+                .underline(row.hinted || hovering, pattern: row.hinted ? .dot : .solid)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(row.hinted ? "You named this line. Wingman checks the voice when the call ends."
+                         : "Who's speaking? Name them, and Wingman names their voice when the call ends.")
+        .popover(isPresented: $editing, arrowEdge: .bottom) {
+            RenameSpeaker(original: Speaker.them.rawValue, current: row.name, suggestions: hinting.invited,
+                          recent: hinting.recent, purpose: .hint) { name in
+                hinting.name(row.id, name.isEmpty ? nil : name)
+                editing = false
+            }
+        }
+        .onChange(of: editing) { editingChanged(editing) }
+    }
+}
+
+/// Popover for giving a speaker a real name. Applies to every line with that
+/// speaker; during the call (`.hint`), to the one line.
 struct RenameSpeaker: View {
+    enum Purpose { case rename, hint }
+
     let original: String
     let current: String
     let suggestions: [String]
     var guess: String? = nil
+    var guessFromHint = false
     var recognized = false
+    /// Names already given in this call.
+    var recent: [String] = []
+    var purpose = Purpose.rename
     var confirm: () -> Void = {}
     let done: (String) -> Void
     @State private var text = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let guess {
+            if purpose == .hint {
+                Text("Who's speaking?").font(.headline)
+                Text("Wingman checks the voice when the call ends.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let guess {
                 Text("Is this \(guess)?").font(.headline)
-                Text("This voice sounds like \(guess) from an earlier meeting.")
+                Text(guessFromHint ? "You named this voice \(guess) during the call."
+                                   : "This voice sounds like \(guess) from an earlier meeting.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Yes, it's \(guess)") { confirm() }
                     .buttonStyle(.borderedProminent)
@@ -697,6 +778,17 @@ struct RenameSpeaker: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            if !recent.isEmpty {
+                Text("Named in this call").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(recent, id: \.self) { name in
+                        Button(name) { done(name) }
+                            .buttonStyle(.plain)
+                            .padding(.vertical, 2)
+                    }
+                }
+                Divider()
+            }
             if !suggestions.isEmpty {
                 Text("Invited to this meeting").font(.caption).foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
@@ -708,15 +800,15 @@ struct RenameSpeaker: View {
                 }
                 Divider()
             }
-            TextField(original, text: $text)
+            TextField(purpose == .hint ? "Name" : original, text: $text)
                 .frame(width: 220)
                 .onSubmit { done(text) }
             HStack {
                 if current != original {
-                    Button("Reset") { done("") }
+                    Button(purpose == .hint ? "Not Sure" : "Reset") { done("") }
                 }
                 Spacer()
-                Button("Rename") { done(text) }
+                Button(purpose == .hint ? "Name" : "Rename") { done(text) }
                     .keyboardShortcut(.defaultAction)
             }
         }

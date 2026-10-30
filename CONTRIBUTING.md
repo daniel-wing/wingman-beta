@@ -76,15 +76,15 @@ swift test --disable-keychain -Xswiftc -F -Xswiftc $F -Xlinker -F -Xlinker $F \
 |---|---|---|
 | Entry | `main.swift` | Without arguments: the app. With a tool name: a diagnostic tool (below); left out with `NO_DIAGNOSTICS`. |
 | App and UI | `UI/WingmanApp.swift` | Scenes (menu bar, window, welcome guide, settings) and `AppDelegate`, which owns the recorder, call watcher, permissions, shortcuts, mute follower, updater and problem reporter. |
-| | `UI/TranscriptView.swift`, `UI/SettingsView.swift`, `UI/WelcomeView.swift`, `UI/Permissions.swift`, `UI/Feedback.swift`, … | Main window, Settings, first-run guide, permission states, feedback and "Report a Problem with a Call". |
-| Past meetings | `PastMeeting.swift`, `UI/MeetingsView.swift` | Naming speakers in saved notes: a journaled rename (backup → note → subtitles → index → voice), the Meetings window. |
+| | `UI/WingmanWindow.swift`, `UI/LiveTranscript.swift`, `UI/TranscriptView.swift`, `UI/SettingsView.swift`, `UI/WelcomeView.swift`, `UI/Permissions.swift`, `UI/Feedback.swift`, … | The Wingman window (sidebar of meetings, a meeting's detail), the Live Transcript (a floating panel during calls), Settings, first-run guide, permission states, feedback and "Report a Problem with a Call". |
+| Past meetings | `PastMeeting.swift`, `UI/MeetingsView.swift` | Naming speakers in saved notes: a journaled rename (backup → note → subtitles → index → voice), saved meetings in the Wingman window. |
 | | `Support/MeetingNote.swift`, `Support/SubtitleRewriter.swift`, `Support/NoteFile.swift` | Reading a note back byte-exactly; renaming a speaker and proving nothing else changed; coordinated, verified writes and note backups. |
 | | `Support/MeetingIndex.swift`, `Transcription/VoiceRecovery.swift` | Speaker ids per meeting, meeting voices kept 180 days, rename jobs; finding voices in older meetings' audio (in a child process, offered with a sample). |
 | | `Support/NoteNaming.swift`, `UI/TranscriptList.swift` | `2026-10-07_01_Name` file names; the shared transcript list with Find, text size and Name Them. |
 | Core | `Recorder.swift` | Capture: idle → preparing → recording. Mic and system-audio streams (each track written by a `TrackWriter` through a `WriterSlot`), mute, device changes, splitting a recording when a new call starts, file transcription. Keeps the open meetings. |
 | | `Meeting.swift` | One meeting: transcript lines, speaker names, note, tracks, and the after-meeting pipeline (language review → speaker separation → recognition → combined audio), run in the background. Each has its own window. |
 | Audio | `Audio/` | Plain AVAudioEngine mic (no voice processing: it silenced Teams), Core Audio process tap for the call, device-change handling with time alignment, resampling, reading audio/video files. |
-| Transcription | `Transcription/` | Parakeet Ultra via FluidAudio (live), Silero voice detection, Whisper large-v3 turbo language review after the meeting, speaker separation and voiceprints. |
+| Transcription | `Transcription/` | Parakeet Ultra via FluidAudio (live), Silero voice detection, Whisper large-v3 turbo language review after the meeting, speaker separation and voiceprints, names given to lines during the call (`NameHints`). |
 | Calls | `Detection/CallDetector.swift`, `CallTracker.swift`, `CallWatcher.swift` | Which apps hold the mic (Core Audio process objects) → call sessions (3 s to start, 6 s to end) → record, ask or ignore per app, per session. `CallReport.swift` keeps each call's steps for problem reports. |
 | Google Meet | `Detection/MeetDetection.swift`, `MeetInspector.swift` | Pure recognition rules and evidence levels; the read-only Accessibility reader of Chrome's tab strip, address bars and the Meet app's capture indicator (`#if !APP_STORE`). |
 | Calendar | `Detection/CalendarLookup.swift` | EventKit: the current meeting, matched by Meet code when there is one. |
@@ -183,7 +183,7 @@ does the signing part on its own, for a maintainer with the certificate.
 
 ## Ideas on the list
 
-- Renaming speakers live during the meeting.
+- Showing a name given during the call on that person's other lines too, before the call ends.
 - Summaries through a command-line AI tool the user already pays for.
 - More languages for recognizing Google Meet and following mute (they're measured in
   English only so far — reports from other languages help).
