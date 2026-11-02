@@ -85,6 +85,12 @@ final class Recorder {
         current = meeting
         return meeting
     }
+    /// `-WingmanStressFinish YES`: the stress call ends and walks through the
+    /// steps after a call, slowly enough to look at. Nothing is saved.
+    func stressEnd(_ meeting: Meeting) {
+        current = nil
+        meeting.stressFinish()
+    }
     func stressLiveLine(_ text: String, at start: TimeInterval) {
         guard let meeting = focus else { return }
         var lines = meeting.lines
@@ -1229,13 +1235,22 @@ final class Recorder {
             }
             // Then watch until the other side is first heard. A quiet start is
             // normal (people join, nobody talks yet), so it takes a minute of
-            // nothing while something plays before it counts as missing.
+            // nothing while something plays before it counts as missing. And
+            // call apps keep their audio open in silence: a capture that is
+            // delivering audio, even silent audio, has the permission (#3).
             let started = Date()
+            var loggedQuiet = false
             while !Task.isCancelled {
                 let heard = await them.peak > 0
                 guard let self, self.phase == .recording else { return }
-                let missing = Self.callAudioMissing(heard: heard, waited: Date().timeIntervalSince(started),
-                                                    somethingPlaying: !CallDetector.processesPlayingAudio().isEmpty)
+                let waited = Date().timeIntervalSince(started)
+                let playing = !CallDetector.processesPlayingAudio().isEmpty
+                let capturing = (self.tap?.converted ?? 0) > 0
+                let missing = Self.callAudioMissing(heard: heard, waited: waited, somethingPlaying: playing, capturing: capturing)
+                if !missing, !heard, !loggedQuiet, Self.callAudioMissing(heard: heard, waited: waited, somethingPlaying: playing, capturing: false) {
+                    loggedQuiet = true
+                    Log.write("call audio silent for a minute, but capture is running: a quiet call, not a missing permission")
+                }
                 if missing != self.callAudioMissing {
                     self.callAudioMissing = missing
                     // The remembered "allowed" may be stale (revoked in System Settings).
@@ -1249,9 +1264,11 @@ final class Recorder {
     }
 
     /// Whether to say call audio is missing: nothing heard for a minute while
-    /// something is playing that should have been heard.
-    nonisolated static func callAudioMissing(heard: Bool, waited: TimeInterval, somethingPlaying: Bool) -> Bool {
-        !heard && waited >= 60 && somethingPlaying
+    /// something is playing that should have been heard, and the capture
+    /// delivers no audio at all. Silent audio arriving means the permission is
+    /// there and the call is just quiet (call apps play silence while nobody talks).
+    nonisolated static func callAudioMissing(heard: Bool, waited: TimeInterval, somethingPlaying: Bool, capturing: Bool) -> Bool {
+        !heard && waited >= 60 && somethingPlaying && !capturing
     }
 
     // MARK: - Transcript

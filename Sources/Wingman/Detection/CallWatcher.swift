@@ -43,6 +43,15 @@ final class CallWatcher {
     /// Opens the Wingman window (set by the app, which owns window handling).
     var showWindow: (() -> Void)?
 
+    /// The first time the Live Transcript is closed during a recording: the
+    /// recording goes on, and here's how to bring it back.
+    func liveTranscriptClosed() {
+        let key = "liveCloseTipShown"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        notifier.tip("Wingman is still recording", "The Live Transcript is only hidden. Bring it back from the W in the menu bar.")
+    }
+
     init(recorder: Recorder, notifier: Notifier) {
         self.recorder = recorder
         self.notifier = notifier

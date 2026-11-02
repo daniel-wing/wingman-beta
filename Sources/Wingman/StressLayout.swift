@@ -82,6 +82,7 @@ enum StressLayout {
                     timer.invalidate()
                     recorder.micMuted = false
                     Log.write("stress: done, \(meeting.lines.count) lines")
+                    if UserDefaults.standard.bool(forKey: "WingmanStressFinish") { recorder.stressEnd(meeting) }
                     return
                 }
                 if tick % 11 == 0 { recorder.micMuted.toggle() }
@@ -96,6 +97,11 @@ enum StressLayout {
             }
         }
         RunLoop.main.add(timer, forMode: .common)
+        // -WingmanStressScroll: a person scrolling up and down through the
+        // transcript during the call, in every window that shows it.
+        if UserDefaults.standard.bool(forKey: "WingmanStressScroll") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { scroll(until: start.addingTimeInterval(seconds)) }
+        }
         // -WingmanStressMinimize: minimized a few seconds in, as during a call.
         if UserDefaults.standard.bool(forKey: "WingmanStressMinimize") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
@@ -103,6 +109,66 @@ enum StressLayout {
                 Log.write("stress: Live Transcript hidden")
             }
         }
+    }
+
+    /// Trackpad-style swipes (finger, then momentum) sent straight to the
+    /// transcript scroll views, so windows behind others or on another space
+    /// get them too. Up and down at random.
+    private static func scroll(until end: Date) {
+        func scrollViews() -> [NSScrollView] {
+            ["live-transcript", "wingman"].compactMap { id in
+                NSApp.windows.first { $0.identifier?.rawValue == id && $0.isVisible }
+            }.compactMap { window in
+                func all(_ view: NSView) -> [NSScrollView] {
+                    (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(all)
+                }
+                // The transcript is the tallest scroll view in the window.
+                return window.contentView.map(all)?.max { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }
+            }
+        }
+        func event(_ dy: Int32, phase: Int64, momentum: Int64) -> NSEvent? {
+            guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0) else { return nil }
+            cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+            cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+            cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum)
+            return NSEvent(cgEvent: cg)
+        }
+        // One swipe as a list of events, sent one per frame.
+        func swipe(_ direction: Int32) -> [NSEvent] {
+            var events = [event(0, phase: 1, momentum: 0)]
+            events += (0..<10).map { event(direction * Int32(6 + $0 * 2), phase: 2, momentum: 0) }
+            events.append(event(0, phase: 4, momentum: 0))
+            var speed = Double.random(in: 15...40)
+            events.append(event(direction * Int32(speed), phase: 0, momentum: 1))
+            while speed > 1 { speed *= 0.93; events.append(event(direction * Int32(speed), phase: 0, momentum: 2)) }
+            events.append(event(0, phase: 0, momentum: 3))
+            return events.compactMap { $0 }
+        }
+        var queue: [NSEvent] = []
+        var pause = 0
+        var swipes = 0
+        Log.write("stress: scrolling the transcript (\(scrollViews().count) window(s))")
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { timer in
+            MainActor.assumeIsolated {
+                guard Date() < end else {
+                    timer.invalidate()
+                    Log.write("stress: scrolled \(swipes) swipes")
+                    return
+                }
+                if pause > 0 { pause -= 1; return }
+                if queue.isEmpty {
+                    // Up or down at random (positive is toward the top), so it
+                    // spends time near the newest line, where following kicks in.
+                    queue = swipe(Bool.random() ? -1 : 1)
+                    swipes += 1
+                    pause = Int.random(in: 0...20)
+                    return
+                }
+                let next = queue.removeFirst()
+                for view in scrollViews() { view.scrollWheel(with: next) }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     /// Drags the transcript window's bottom-right corner around with real mouse

@@ -306,6 +306,7 @@ final class LiveTranscriptController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if recorder.isRecording { watcher.liveTranscriptClosed() }
         state.close()
         evaluate()
         return false
@@ -382,7 +383,12 @@ struct LiveTranscriptView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Recording")
             } else {
-                MeetingStatus(meeting: meeting).font(.callout)
+                // The bar at the bottom says how finishing goes.
+                if meeting.stage.isFinishing {
+                    Text("Call ended").font(.callout).foregroundStyle(.secondary)
+                } else {
+                    MeetingStatus(meeting: meeting).font(.callout)
+                }
             }
             Button {
                 naming = true
@@ -454,9 +460,13 @@ struct LiveTranscriptView: View {
         VStack(spacing: 0) {
             Divider()
             HStack {
-                Text(savedText(meeting))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                if meeting.stage.isFinishing {
+                    FinishingProgress(meeting: meeting, compact: prefs.compact)
+                } else {
+                    Text(savedText(meeting))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
                 Spacer()
                 Button("Open in Wingman") { open(meeting.id) }
                     .controlSize(.small)
@@ -470,7 +480,7 @@ struct LiveTranscriptView: View {
 
 extension LiveTranscriptView {
     private func savedText(_ meeting: Meeting) -> String {
-        guard meeting.stage == .done else { return "Saving…" }
+        guard meeting.stage == .done else { return "Finishing your notes…" }
         let count = meeting.guessCount
         return count == 0 ? "Saved. Name the speakers in the Wingman window."
                           : "Saved. \(count) \(count == 1 ? "name" : "names") to confirm in the Wingman window."

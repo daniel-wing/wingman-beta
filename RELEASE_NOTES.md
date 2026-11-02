@@ -1,5 +1,23 @@
 # Release notes
 
+## 0.10.1 — no freeze while scrolling during a call, and finishing says how long it takes
+
+- **Fix: Wingman could freeze while you scrolled the transcript during a call**, and then
+  restart in the middle of it. During the call, lines can't be selected for now; once the
+  call ends you can select and copy them as before.
+
+- **After a call, Wingman says what it's doing and about how long it takes:**
+  "Finishing your notes · about 40 s", with the steps ticking off (transcript, languages,
+  speakers, audio). The time is learned from your earlier calls, so the first one shows
+  no number.
+- **Fix:** a quiet start to a call (nobody talking yet for a minute) no longer shows "No
+  call audio heard" and sends you to System Settings. The warning now appears only when
+  Wingman really gets no call audio.
+- **The welcome guide offers "Open Wingman at login"**, so calls are noticed without
+  opening it first (also in Settings → General).
+- The first time you close the Live Transcript during a call, a notification says Wingman
+  is still recording and how to bring the window back.
+
 ## 0.10.0 — one Wingman window, and a Live Transcript over your call
 
 - **Two windows instead of three.** The **Wingman window** has everything: the call going

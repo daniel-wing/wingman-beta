@@ -11,6 +11,7 @@ struct WelcomeView: View {
     let done: () -> Void
 
     @State private var page: Int
+    @State private var loginItem = LoginItem()
     private let pages = 5
 
     init(recorder: Recorder, watcher: CallWatcher, permissions: Permissions, callMute: AnyObject? = nil,
@@ -231,9 +232,15 @@ struct WelcomeView: View {
     private var finishPage: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("You're all set").font(.largeTitle.weight(.bold))
-            point("waveform", "Find Wingman in the menu bar", "Click the waveform at the top of your screen to start or stop recording and open the transcript.")
+            point("menubar.rectangle", "Find Wingman in the menu bar", "Click the W at the top of your screen to start or stop recording, or to open Wingman.")
             point("phone", "Or just start your call", "Teams and Zoom calls are picked up based on what you chose.")
             point("gearshape", "Change anything later", "Settings (⌘,) has everything from this guide, and can show it again.")
+            // Calls are noticed only while Wingman is open.
+            Toggle("Open Wingman when I log in, so calls are noticed without opening it first",
+                   isOn: Binding(get: { loginItem.isOn }, set: { loginItem.set($0) }))
+            if let problem = loginItem.problem {
+                Text(problem).font(.callout).foregroundStyle(.orange)
+            }
             if permissions.microphone != .granted || permissions.systemAudio != .granted {
                 Label("Microphone and system audio are needed to record. You can allow them from the Permissions step or in System Settings.", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)

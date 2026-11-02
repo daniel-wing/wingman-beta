@@ -284,13 +284,54 @@ struct MeetingStatus: View {
                     Image(systemName: "record.circle.fill").foregroundStyle(.red)
                 }
             }
-        case .finishing(let message):
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(message).foregroundStyle(.secondary)
-            }
+        case .finishing:
+            FinishingProgress(meeting: meeting, compact: true)
         case .done:
             Text("Saved").foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// After the call, said upfront: "Finishing your notes · about 40 s", the
+/// steps ticking off, and a light line that changes every few seconds (the
+/// real step's words with Reduce Motion, and for VoiceOver).
+struct FinishingProgress: View {
+    let meeting: Meeting
+    var compact = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if case .finishing(let message) = meeting.stage {
+            // Once a second, and only this small view.
+            TimelineView(.periodic(from: meeting.finishStarted ?? .now, by: 1)) { context in
+                let elapsed = context.date.timeIntervalSince(meeting.finishStarted ?? context.date)
+                let left = FinishTiming.remaining(estimate: meeting.finishEstimate, elapsed: elapsed)
+                let title = left.map { "Finishing your notes · \($0)" } ?? "Finishing your notes…"
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(title).foregroundStyle(.secondary)
+                    }
+                    if !compact, let current = meeting.finishStep {
+                        HStack(spacing: 10) {
+                            ForEach(FinishStep.allCases, id: \.self) { step in
+                                Label(step.title, systemImage: step < current ? "checkmark.circle.fill"
+                                      : step == current ? "circle.dotted" : "circle")
+                                    .foregroundStyle(step < current ? Color.green : step == current ? Color.primary : Color.secondary.opacity(0.5))
+                            }
+                        }
+                        .font(.caption)
+                        // The real words when they say more (the first download), or with Reduce Motion.
+                        Text(reduceMotion || message.contains("download") ? message : FinishTiming.quip(elapsed: elapsed))
+                            .font(.caption)
+                            .italic()
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .help(message)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel([title, message].joined(separator: ". "))
+            }
         }
     }
 }

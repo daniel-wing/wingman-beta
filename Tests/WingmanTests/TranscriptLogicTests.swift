@@ -177,16 +177,22 @@ private func line(_ speaker: Speaker, _ start: TimeInterval, _ end: TimeInterval
 @Suite struct CallAudioWarningTests {
     @Test func quietStartIsNotAProblem() {
         // Nobody has spoken yet 18 s in: no warning (the old check warned here and never cleared).
-        #expect(!Recorder.callAudioMissing(heard: false, waited: 18, somethingPlaying: true))
+        #expect(!Recorder.callAudioMissing(heard: false, waited: 18, somethingPlaying: true, capturing: false))
     }
 
     @Test func aMinuteOfNothingWhilePlayingIsWarned() {
-        #expect(Recorder.callAudioMissing(heard: false, waited: 61, somethingPlaying: true))
+        #expect(Recorder.callAudioMissing(heard: false, waited: 61, somethingPlaying: true, capturing: false))
+    }
+
+    @Test func aQuietCallIsNotAMissingPermission() {
+        // #3: Teams and Meet keep playing silence while nobody talks; the
+        // capture delivers it, so the permission is there.
+        #expect(!Recorder.callAudioMissing(heard: false, waited: 120, somethingPlaying: true, capturing: true))
     }
 
     @Test func warningGoesOnceAudioArrivesOrNothingPlays() {
-        #expect(!Recorder.callAudioMissing(heard: true, waited: 90, somethingPlaying: true))
-        #expect(!Recorder.callAudioMissing(heard: false, waited: 90, somethingPlaying: false))
+        #expect(!Recorder.callAudioMissing(heard: true, waited: 90, somethingPlaying: true, capturing: false))
+        #expect(!Recorder.callAudioMissing(heard: false, waited: 90, somethingPlaying: false, capturing: false))
     }
 }
 

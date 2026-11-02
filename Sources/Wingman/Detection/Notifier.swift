@@ -149,6 +149,14 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         post(Self.warningID, content)
     }
 
+    /// A one-time tip, e.g. that closing the Live Transcript doesn't stop recording.
+    func tip(_ title: String, _ body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        post("wingman.tip.\(UUID().uuidString)", content)
+    }
+
     func withdrawWarning() {
         center.removeDeliveredNotifications(withIdentifiers: [Self.warningID])
     }

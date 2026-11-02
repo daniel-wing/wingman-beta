@@ -481,7 +481,7 @@ struct TranscriptList<Empty: View>: View {
                         LineView(row: row, size: prefs.size, canRename: canRename, suggestions: suggestions,
                                  highlights: matches.filter { $0.row == offset }.map(\.range),
                                  current: current?.row == offset ? current?.range : nil,
-                                 emphasized: walk.speaker == row.speakerKey, hinting: hinting,
+                                 emphasized: walk.speaker == row.speakerKey, selectable: !live, hinting: hinting,
                                  // The list holds still while a line is being named, so
                                  // new lines don't scroll it (and its popover) away.
                                  hintEditing: { open in frozen = open ? self.rows : nil },
@@ -607,6 +607,8 @@ struct LineView: View {
     var highlights: [Range<String.Index>] = []
     var current: Range<String.Index>?
     var emphasized = false
+    /// Finished lines can be selected, except during the call: see `selectable(_:)`.
+    var selectable = true
     var hinting: LineHinting?
     var hintEditing: (Bool) -> Void = { _ in }
     let rename: (String) -> Void
@@ -701,7 +703,7 @@ struct LineView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // Only finished lines can be selected: the live line changes
                 // several times a second, and its selection view with it.
-                .selectable(row.isFinal && !StressLayout.oldLayout)
+                .selectable(selectable && row.isFinal && !StressLayout.oldLayout)
         }
         .padding(.vertical, emphasized ? 2 : 0)
         .background(emphasized ? color.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 4))
@@ -818,9 +820,14 @@ struct RenameSpeaker: View {
 }
 
 private extension View {
-    /// Text selection on or off (the two settings are different types).
+    /// Text selection, or none at all. Selectable text puts an AppKit view
+    /// (SwiftUI's `SelectionOverlay`) on each line. On the field Mac (0.10.0,
+    /// 2 Nov) the main thread hung while the owner scrolled a live transcript,
+    /// updating those views over and over as rows came and went, with memory
+    /// climbing; so a live list has none, and lines become selectable when
+    /// the call ends. Off means no modifier, not `.disabled`, so no overlay.
     @ViewBuilder func selectable(_ on: Bool) -> some View {
-        if on { textSelection(.enabled) } else { textSelection(.disabled) }
+        if on { textSelection(.enabled) } else { self }
     }
 }
 

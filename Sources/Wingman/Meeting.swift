@@ -62,6 +62,11 @@ final class Meeting: Identifiable {
     /// The lines have their final labels (Them 1, Them 2…): names given to
     /// lines during the call now apply to voices.
     private(set) var labelsFinal = false
+    /// After the call: the step being done, when finishing started, and about
+    /// how long it should take (`FinishTiming`; nil without history).
+    private(set) var finishStep: FinishStep?
+    private(set) var finishStarted: Date?
+    private(set) var finishEstimate: TimeInterval?
     private var speakerIDs: [String: UUID] = [:]
     private(set) var differentVoice: DifferentVoice?
     struct DifferentVoice: Equatable {
@@ -216,7 +221,11 @@ final class Meeting: Identifiable {
     func finish(transcribedFrom file: (samples: Int, scratch: URL)? = nil) {
         guard finishing == nil else { return }
         endedAt = file.map { startedAt!.addingTimeInterval(Double($0.samples) / Resampler.sampleRate) } ?? endedAt ?? Date()
-        stage = .finishing("Finishing transcript…")
+        step(.transcript, "Finishing transcript…")
+        let started = Date()
+        finishStarted = started
+        let minutes = (endedAt ?? started).timeIntervalSince(startedAt ?? started) / 60
+        finishEstimate = file == nil ? FinishTiming.estimate(minutes: minutes, rate: FinishTiming.rate) : nil
         finishing = Task { [weak self] in
             guard let self else { return }
             // A partial line left by a split or a stop becomes final as it is.
@@ -245,6 +254,8 @@ final class Meeting: Identifiable {
             meAudio = nil
             themAudio = nil
             RecordingRecovery.remove(id: recordingID, in: Recorder.scratchFolder)
+            if file == nil { FinishTiming.record(took: Date().timeIntervalSince(started), minutes: minutes) }
+            finishStep = nil
             stage = .done
             recorder.meetingFinished(self)
         }
@@ -265,7 +276,7 @@ final class Meeting: Identifiable {
     /// Wingman quitting mid-meeting; once the meeting is done they're kept as
     /// .m4a, about a tenth of the size. A WAV stays if its copy couldn't be made.
     private func compressTracks() async {
-        stage = .finishing("Saving audio…")
+        step(.audio, "Saving audio…")
         let fm = FileManager.default
         for speaker in [Speaker.me, .them] {
             guard let track = speaker == .me ? meAudio : themAudio else { continue }
@@ -291,7 +302,7 @@ final class Meeting: Identifiable {
         guard recorder.keepAudio, let note = currentNote else { return true }
         let tracks = [meAudio, themAudio].compactMap { $0 }
         guard !tracks.isEmpty else { return true }
-        stage = .finishing("Saving audio…")
+        step(.audio, "Saving audio…")
         let output = note.deletingPathExtension().appendingPathExtension("m4a")
         do {
             try await Task.detached(priority: .utility) { try AudioMix.mix(tracks, to: output) }.value
@@ -334,7 +345,7 @@ final class Meeting: Identifiable {
         let snapshot = lines
         guard snapshot.contains(where: { LanguageReview.needsReview($0, enabled: enabled) }) else { return }
 
-        stage = .finishing("Reviewing languages…")
+        step(.languages, "Reviewing languages…")
         let fixes = await LanguageReview.fixes(for: snapshot, audio: audio, enabled: enabled, main: recorder.mainLanguage) {
             [weak self] message in self?.stage = .finishing(message)
         }
@@ -353,7 +364,7 @@ final class Meeting: Identifiable {
         let themIndices = lines.indices.filter { lines[$0].speaker == .them && lines[$0].isFinal }
         guard themIndices.count > 1 else { return }
 
-        stage = .finishing("Identifying speakers (the first time downloads ~20 MB)…")
+        step(.speakers, "Identifying speakers (the first time downloads ~20 MB)…")
         do {
             let result = try await recorder.separation.separate(audio)
             let numbered = SpeakerSeparation.numbered(result.turns, themIndices.map { (lines[$0].start, lines[$0].end) })
@@ -839,6 +850,31 @@ final class Meeting: Identifiable {
     }
 
     func setStage(_ new: Stage) { stage = new }
+
+    #if !NO_DIAGNOSTICS
+    /// Development only (`Recorder.stressEnd`): the steps after a call, 6 s
+    /// each, against an estimate of 24 s. Nothing runs and nothing is saved.
+    func stressFinish() {
+        finishStarted = Date()
+        finishEstimate = 24
+        Task { @MainActor in
+            let steps: [(FinishStep, String)] = [(.transcript, "Finishing transcript…"), (.languages, "Reviewing languages…"),
+                                                 (.speakers, "Identifying speakers…"), (.audio, "Saving audio…")]
+            for (finish, message) in steps {
+                step(finish, message)
+                try? await Task.sleep(for: .seconds(6))
+            }
+            finishStep = nil
+            stage = .done
+        }
+    }
+    #endif
+
+    /// A step after the call, with what it says.
+    private func step(_ step: FinishStep, _ message: String) {
+        finishStep = step
+        stage = .finishing(message)
+    }
 
 
     /// Stress mode and tests: replaces the lines as they are.
