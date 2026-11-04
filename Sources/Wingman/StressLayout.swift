@@ -21,7 +21,9 @@ enum StressLayout {
     static func run(recorder: Recorder, seconds: Double) {
         let meeting = recorder.stressMeeting()
         recorder.showMeeting?(meeting)
-        recorder.stressFill(lines: 50)
+        // -WingmanStressLines 0: start empty, as a call does, so the lines cross
+        // the height of the list while the test watches.
+        recorder.stressFill(lines: UserDefaults.standard.string(forKey: "WingmanStressLines").flatMap(Int.init) ?? 50)
         let start = Date()
         if UserDefaults.standard.bool(forKey: "WingmanStressFollow") {
             follow(meeting, recorder: recorder, seconds: seconds, start: start)
@@ -73,6 +75,7 @@ enum StressLayout {
         let speakers: [Speaker] = [.them, .me]
         var voices = [Voice(began: 300), Voice(began: 301.5)]
         var tick = 0
+        let overflow = UserDefaults.standard.bool(forKey: "WingmanStressOverflow")
         Log.write("stress: \(Int(seconds)) s of two overlapping live lines, no resizing")
         let timer = Timer(timeInterval: 0.25, repeats: true) { timer in
             MainActor.assumeIsolated {
@@ -86,6 +89,19 @@ enum StressLayout {
                     return
                 }
                 if tick % 11 == 0 { recorder.micMuted.toggle() }
+                // -WingmanStressOverflow: start over every 24 s at another width,
+                // so the text first stops fitting many times in one run: the
+                // moment the early hangs came at (3-5 lines, 2026-11-03).
+                if overflow, tick % 96 == 0 {
+                    meeting.stressClear()
+                    voices = [Voice(began: 300 + elapsed), Voice(began: 301.5 + elapsed)]
+                    for id in ["live-transcript", "wingman"] {
+                        guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == id && $0.isVisible }) else { continue }
+                        var frame = window.frame
+                        frame.size.width = (id == "wingman" ? 620 : 340) + CGFloat(tick / 96 * 37 % 240)
+                        window.setFrame(frame, display: true)
+                    }
+                }
                 let i = tick % 2
                 voices[i].words += 1 + tick % 3
                 let text = (0..<voices[i].words).map { words[($0 + tick) % words.count] }.joined(separator: " ")

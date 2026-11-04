@@ -29,6 +29,15 @@ struct MeetingNote: Equatable {
         case unclear = " *(unclear)*"
         case possibleEcho = " *(possible echo)*"
         case incomplete = " *(incomplete)*"
+
+        /// What the note says about the mark, under the transcript.
+        var explanation: String {
+            switch self {
+            case .unclear: "*(unclear)* marks lines the speech model wasn't confident about; check them against the audio."
+            case .incomplete: "*(incomplete)* marks lines the speech model failed on; the text is what it had heard so far."
+            case .possibleEcho: "*(possible echo)* marks your lines that may be the call coming back through your speakers."
+            }
+        }
     }
 
     struct Line: Equatable {

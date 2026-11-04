@@ -163,8 +163,7 @@ enum NoteFile {
     /// Copies of notes taken before Wingman changed them, in Wingman's own
     /// folder (not the notes folder, which is often synced), readable only by
     /// you; each kept 30 days, at most 10 per meeting.
-    static let backupsFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Wingman/Note Backups", isDirectory: true)
+    static let backupsFolder = DataFolders.support.appendingPathComponent("Note Backups", isDirectory: true)
     static let keepBackupsDays = 30
     static let backupsPerMeeting = 10
 

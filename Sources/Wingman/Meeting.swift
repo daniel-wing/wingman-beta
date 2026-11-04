@@ -22,11 +22,14 @@ final class Meeting: Identifiable {
     /// Also its id in `MeetingIndex` and for the voices learned from it.
     let id = UUID()
     /// For recovery records and notifications about this recording.
-    let recordingID = UUID()
+    let recordingID: UUID
     private(set) var stage: Stage
     unowned let recorder: Recorder
 
     private(set) var lines: [TranscriptLine] = []
+    #if !NO_DIAGNOSTICS
+    func stressClear() { lines = [] }
+    #endif
     /// Where this meeting starts in the recorder's capture, in seconds (0 unless
     /// it was split off a running recording).
     let origin: TimeInterval
@@ -83,6 +86,17 @@ final class Meeting: Identifiable {
     var callMeetingCode: String?
     /// Whether the WAV tracks live next to the note (vs. scratch files).
     let tracksKept: Bool
+    /// When Wingman stopped during this recording (a crash or a force quit):
+    /// the next launch finished it, and the recording ends there.
+    private(set) var interruptedAt: Date?
+    /// Stretches nothing was recorded because Wingman restarted mid-call and
+    /// this meeting went on after it (`Recorder.continueWithin`).
+    struct Gap: Equatable {
+        /// Where it starts, in seconds from the start of the meeting.
+        let at: TimeInterval
+        let seconds: TimeInterval
+    }
+    private(set) var gaps: [Gap] = []
     private(set) var meAudio: URL?
     private(set) var themAudio: URL?
     private var learned: [String: UUID] = [:]
@@ -93,8 +107,20 @@ final class Meeting: Identifiable {
     var joinable = false
 
     init(recorder: Recorder, stage: Stage, origin: TimeInterval, started: Date, name: String, event: MeetingInfo?,
-         nameFromCalendar: Bool, base: URL, prefix: String, tracksKept: Bool, meAudio: URL?, themAudio: URL?, sourceFile: String? = nil) {
+         nameFromCalendar: Bool, base: URL, prefix: String, tracksKept: Bool, meAudio: URL?, themAudio: URL?, sourceFile: String? = nil,
+         recordingID: UUID = UUID(), interrupted: (lines: [TranscriptLine], at: Date)? = nil,
+         continuing: (lines: [TranscriptLine], gap: Gap)? = nil) {
         self.recorder = recorder
+        self.recordingID = recordingID
+        if let continuing {
+            lines = continuing.lines
+            gaps = [continuing.gap]
+        }
+        if let interrupted {
+            lines = interrupted.lines
+            interruptedAt = interrupted.at
+            endedAt = interrupted.at
+        }
         self.stage = stage
         self.origin = origin
         self.startedAt = started
@@ -225,7 +251,10 @@ final class Meeting: Identifiable {
         let started = Date()
         finishStarted = started
         let minutes = (endedAt ?? started).timeIntervalSince(startedAt ?? started) / 60
-        finishEstimate = file == nil ? FinishTiming.estimate(minutes: minutes, rate: FinishTiming.rate) : nil
+        // A file, or a recording finished at the next launch, says nothing about
+        // how long a call takes to finish.
+        let timed = file == nil && interruptedAt == nil
+        finishEstimate = timed ? FinishTiming.estimate(minutes: minutes, rate: FinishTiming.rate) : nil
         finishing = Task { [weak self] in
             guard let self else { return }
             // A partial line left by a split or a stop becomes final as it is.
@@ -254,7 +283,7 @@ final class Meeting: Identifiable {
             meAudio = nil
             themAudio = nil
             RecordingRecovery.remove(id: recordingID, in: Recorder.scratchFolder)
-            if file == nil { FinishTiming.record(took: Date().timeIntervalSince(started), minutes: minutes) }
+            if timed { FinishTiming.record(took: Date().timeIntervalSince(started), minutes: minutes) }
             finishStep = nil
             stage = .done
             recorder.meetingFinished(self)
@@ -268,7 +297,8 @@ final class Meeting: Identifiable {
     func saveRecoveryRecord() {
         guard sourceFile == nil, let note = currentNote, stage != .done else { return }
         let record = RecordingRecovery.Record(note: note, tracks: [meAudio, themAudio].compactMap { $0 },
-                                              keepAudio: recorder.keepAudio, tracksKept: tracksKept, started: startedAt ?? Date())
+                                              keepAudio: recorder.keepAudio, tracksKept: tracksKept, started: startedAt ?? Date(),
+                                              name: meetingName, event: meeting, nameFromCalendar: nameFromCalendar, callApp: callApp)
         RecordingRecovery.save(record, id: recordingID, in: Recorder.scratchFolder)
     }
 
@@ -584,6 +614,7 @@ final class Meeting: Identifiable {
             nameFromCalendar = new != nil
         }
         Log.write("calendar event \(new == nil ? "detached" : "picked") by user")
+        saveRecoveryRecord()
         applyMeetingName()
         recognizePeople()
         writeNote()
@@ -812,6 +843,9 @@ final class Meeting: Identifiable {
 
         """
         if let sourceFile { text += "\n**Transcribed from:** \(sourceFile)  \n" }
+        if let interruptedAt {
+            text += "\n**Recording:** Wingman stopped unexpectedly at \(interruptedAt.formatted(date: .omitted, time: .shortened)), so it ends there.  \n"
+        }
         if let meeting {
             let time = "\(meeting.start.formatted(date: .omitted, time: .shortened))–\(meeting.end.formatted(date: .omitted, time: .shortened))"
             text += "\n**Calendar:** \(meeting.title.isEmpty ? "Untitled event" : meeting.title), \(time)  \n"
@@ -820,17 +854,31 @@ final class Meeting: Identifiable {
             if let link = meeting.link { text += "**Link:** \(link.absoluteString)  \n" }
         }
         text += "\n## Transcript\n"
+        var gapsLeft = gaps.sorted { $0.at < $1.at }
+        func gapRow(_ gap: Gap) -> String {
+            "\n*[\(Recorder.timestamp(gap.at))] Not recorded for \(Self.duration(gap.seconds)) (Wingman restarted).*\n"
+        }
         for line in lines where line.isFinal {
+            while let gap = gapsLeft.first, line.start >= gap.at {
+                text += gapRow(gap)
+                gapsLeft.removeFirst()
+            }
             let flag = line.incomplete ? " *(incomplete)*" : line.possibleEcho ? " *(possible echo)*" : line.isUnclear ? " *(unclear)*" : ""
             text += "\n[\(Recorder.timestamp(line.start))] **\(displayName(line)):** \(line.text)\(flag)\n"
         }
+        for gap in gapsLeft { text += gapRow(gap) }
         let final = lines.filter(\.isFinal)
         var marks: [String] = []
-        if final.contains(where: \.isUnclear) { marks.append("*(unclear)* marks lines the speech model wasn't confident about; check them against the audio.") }
-        if final.contains(where: \.incomplete) { marks.append("*(incomplete)* marks lines the speech model failed on; the text is what it had heard so far.") }
-        if final.contains(where: \.possibleEcho) { marks.append("*(possible echo)* marks your lines that may be the call coming back through your speakers.") }
+        if final.contains(where: \.isUnclear) { marks.append(MeetingNote.Mark.unclear.explanation) }
+        if final.contains(where: \.incomplete) { marks.append(MeetingNote.Mark.incomplete.explanation) }
+        if final.contains(where: \.possibleEcho) { marks.append(MeetingNote.Mark.possibleEcho.explanation) }
         if !marks.isEmpty { text += "\n---\n" + marks.joined(separator: "  \n") + "\n" }
         return text
+    }
+
+    /// "45 s", "3 min".
+    nonisolated static func duration(_ seconds: TimeInterval) -> String {
+        seconds < 90 ? "\(Int(seconds.rounded())) s" : "\(Int((seconds / 60).rounded())) min"
     }
 
     /// Save Note As…: the note somewhere else, when it couldn't be saved where it belongs.

@@ -140,8 +140,7 @@ final class MeetingIndex {
     /// A file is from a newer Wingman: read what we can, write nothing.
     private(set) var readOnly = false
 
-    nonisolated static let defaultFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Wingman", isDirectory: true)
+    nonisolated static let defaultFolder = DataFolders.support
     private let indexFile: URL
     private let voicesFile: URL
 

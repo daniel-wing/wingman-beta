@@ -2,7 +2,7 @@ import EventKit
 import Foundation
 
 /// The calendar event a recording belongs to.
-struct MeetingInfo: Equatable, Sendable, Identifiable {
+struct MeetingInfo: Equatable, Sendable, Identifiable, Codable {
     /// Stable per occurrence (recurring meetings share an event identifier).
     let id: String
     let title: String

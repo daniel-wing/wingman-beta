@@ -196,6 +196,131 @@ final class Counter: @unchecked Sendable {
     }
 }
 
+@Suite struct InterruptedMeetingTests {
+    private let note = """
+    # Weekly sync
+
+    **Date:** 2 Nov 2026 at 9:00
+    **Duration:** 9 min
+
+    ## Transcript
+
+    [00:00:05] **Them:** Can you hear me now
+    [00:00:07] **Me:** Yes
+    [00:00:09] **Them:** Good so the plan for this quarter is ready and we should look at it today *(unclear)*
+    [00:00:40] **Daniel:** I'll share it after the call
+    [00:00:41] **Them:** Thanks *(possible echo)*
+
+    """
+
+    @Test func theNoteWrittenDuringTheCallComesBackAsFinishedLines() {
+        let lines = RecordingRecovery.lines(from: MeetingNote.parse(Data(note.utf8))) { $0 != "Them" }
+        #expect(lines.map(\.speaker) == [.them, .me, .them, .me, .them])
+        #expect(lines.map(\.start) == [5, 7, 9, 40, 41])
+        #expect(lines.allSatisfy { $0.isFinal })
+        // "Can you hear me now": 5 words, 2.8 s, before the next line from the call.
+        #expect(lines[0].end == 7.8)
+        // 0.4 s a word plus 0.8 s: 16 words, 7.2 s.
+        #expect(abs(lines[2].end - 16.2) < 0.001)
+        // A one-word line still gets 1.5 s.
+        #expect(lines[4].end == 42.5)
+        #expect(lines[2].isUnclear)
+        #expect(lines[4].possibleEcho)
+        // Lines never end before they start, even with the next one a second later.
+        #expect(lines.allSatisfy { $0.end > $0.start })
+    }
+
+    @Test func aRecordFromBeforeItKeptTheNameStillReads() throws {
+        let old = #"{"note":"file:///tmp/a.md","tracks":[],"keepAudio":true,"tracksKept":false,"started":800000000}"#
+        let record = try JSONDecoder().decode(RecordingRecovery.Record.self, from: Data(old.utf8))
+        #expect(record.name == nil && record.event == nil && record.nameFromCalendar == nil)
+    }
+
+    @Test func aRecordKeepsTheMeetingsNameAndEvent() throws {
+        let event = MeetingInfo(id: "e1", title: "Weekly sync", start: Date(timeIntervalSince1970: 0),
+                                end: Date(timeIntervalSince1970: 1800), organizer: nil, attendees: ["Ana"], link: nil)
+        let record = RecordingRecovery.Record(note: URL(fileURLWithPath: "/tmp/a.md"), tracks: [], keepAudio: true, tracksKept: false,
+                                              started: Date(timeIntervalSince1970: 0), name: "Weekly sync", event: event, nameFromCalendar: true)
+        let back = try JSONDecoder().decode(RecordingRecovery.Record.self, from: try JSONEncoder().encode(record))
+        #expect(back == record)
+    }
+
+    @Test func theRecordingIDComesFromTheRecordsFileName() {
+        let id = UUID()
+        #expect(RecordingRecovery.id(of: RecordingRecovery.recordURL(for: id, in: URL(fileURLWithPath: "/tmp"))) == id)
+        #expect(RecordingRecovery.id(of: URL(fileURLWithPath: "/tmp/other.json")) == nil)
+    }
+}
+
+/// A value set on a writer's queue and read after `finish()` (which waits for it).
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool
+    init(_ value: Bool) { self.value = value }
+    func withLock<T>(_ body: (inout Bool) -> T) -> T { lock.withLock { body(&value) } }
+}
+
+@Suite struct GoingOnAfterARestartTests {
+    @Test func theEarlierAudioAndTheGapComeBeforeTheNewAudio() throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let earlier = folder.appendingPathComponent("earlier-them.wav")
+        let first = try TrackWriter(url: earlier) { _ in }
+        first.append(tone(16_000))
+        #expect(first.finish() == 16_000)
+
+        let url = folder.appendingPathComponent("new-them.wav")
+        let writer = try TrackWriter(url: url) { _ in }
+        let made = Flag(false)
+        writer.appendEarlier(earlier, expected: 16_000, silence: 8_000) { ok in made.withLock { $0 = ok } }
+        writer.append(tone(4_000, 0.5))
+        #expect(writer.finish() == 28_000)
+        let file = try AVAudioFile(forReading: url)
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 28_000))
+        try file.read(into: buffer)
+        let samples = Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: 28_000))
+        let earlierTone = tone(16_000)
+        #expect(samples[100] == earlierTone[100] && samples[15_000] == earlierTone[15_000])
+        #expect(samples[16_000..<24_000].allSatisfy { $0 == 0 })
+        #expect(samples[24_100] == tone(4_000, 0.5)[100])
+        #expect(made.withLock { $0 })
+    }
+
+    @Test func anUnreadableEarlierTrackBecomesSilenceSoTheTimelineHolds() throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("new-me.wav")
+        let writer = try TrackWriter(url: url) { _ in }
+        let made = Flag(true)
+        writer.appendEarlier(folder.appendingPathComponent("missing.wav"), expected: 16_000, silence: 8_000) { ok in made.withLock { $0 = ok } }
+        writer.append(tone(4_000))
+        #expect(writer.finish() == 28_000)
+        #expect(!made.withLock { $0 })
+    }
+
+    @MainActor
+    @Test func theNoteMarksTheTimeNothingWasRecorded() throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let recorder = Recorder()
+        let before = [TranscriptLine(id: UUID(), speaker: .them, start: 5, end: 8, text: "before the restart", isFinal: true)]
+        let meeting = Meeting(recorder: recorder, stage: .recording, origin: -75, started: Date(), name: "Test", event: nil,
+                              nameFromCalendar: false, base: folder.appendingPathComponent("test"), prefix: "test", tracksKept: false,
+                              meAudio: nil, themAudio: nil, sourceFile: "test",
+                              continuing: (before, Meeting.Gap(at: 30, seconds: 45)))
+        var text = try #require(meeting.noteText())
+        #expect(text.contains("*[00:00:30] Not recorded for 45 s (Wingman restarted).*"))
+        // A line from after the restart lands after the gap: the recorder's 2 s is 77 s into the meeting.
+        meeting.handle(TranscriptEvent(utteranceID: UUID(), speaker: .them, start: 77, end: 80, text: "after the restart", isFinal: true))
+        text = try #require(meeting.noteText())
+        let gap = try #require(text.range(of: "Not recorded"))
+        #expect(try #require(text.range(of: "before the restart")).lowerBound < gap.lowerBound)
+        #expect(gap.lowerBound < (try #require(text.range(of: "after the restart"))).lowerBound)
+        #expect(Meeting.duration(45) == "45 s" && Meeting.duration(200) == "3 min")
+        withExtendedLifetime(recorder) {}
+    }
+}
+
 @Suite struct WatchdogTests {
     @Test func reportsAt5_10_30_60ThenEveryMinute() {
         var last = 0.0, times: [Double] = []

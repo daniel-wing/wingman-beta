@@ -8,6 +8,14 @@ import Testing
 @Suite struct HangSafetyTests {
     // MARK: Following the newest line
 
+    @Test func aLiveListShowsTheNewestLines() {
+        #expect(LiveTail.first(of: 10, showing: 50, all: false) == 0)
+        #expect(LiveTail.first(of: 300, showing: 50, all: false) == 250)
+        #expect(LiveTail.first(of: 300, showing: 150, all: false) == 150)
+        // Find and naming go through every line.
+        #expect(LiveTail.first(of: 300, showing: 50, all: true) == 0)
+    }
+
     @Test func distanceHasADeadBand() {
         // 500 pt visible of 2000 pt of content.
         func at(_ below: CGFloat) -> TranscriptFollower.Distance {

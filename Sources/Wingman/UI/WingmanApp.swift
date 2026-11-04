@@ -390,6 +390,7 @@ private struct MenuBarLabel: View {
                     }
                 }
                 delegate.recorder.closeMeeting = { meeting in nav.forget(meeting.id) }
+                delegate.recorder.showNote = { url in nav.show(.note(url)) }
                 live.openInWingman = { id in
                     nav.show(.meeting(id))
                     openWingman()

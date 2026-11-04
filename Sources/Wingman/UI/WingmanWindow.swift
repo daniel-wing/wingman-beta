@@ -166,6 +166,8 @@ struct WingmanWindowView: View {
             Task { await store.refresh() }
         }
         .onChange(of: recorder.phase) { if recorder.phase == .idle { Task { await store.refresh() } } }
+        // A join changes two meetings' notes at once.
+        .onChange(of: recorder.joinResult) { Task { await store.refresh() } }
         .onChange(of: nav.selection) { recorder.trimDone() }
         // A meeting deleted here (or its note removed elsewhere) leaves the detail.
         .onChange(of: store.entries.map(\.url)) {

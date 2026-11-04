@@ -120,6 +120,9 @@ struct MeetingDetailView: View {
                 }
                 .font(.callout)
             }
+            if meeting.stage == .done, let note = meeting.currentNote, meeting.noteSaved {
+                JoinWithPrevious(recorder: recorder, note: note)
+            }
             Messages(notice: meeting.notice, warning: live ? (recorder.warning ?? meeting.warning) : meeting.warning,
                      error: meeting.lastError)
             if let error = meeting.noteSaveError {

@@ -272,7 +272,8 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
   see-through window marked **LIVE** that floats above the call (also in full screen),
   with Mute, New Note and Stop at the top. It never takes the focus from your call.
   Close it to hide it: Wingman keeps recording, and **Show Live Transcript** in the menu
-  bar brings it back. The ⇕ button shrinks it to the latest line. When the call ends it
+  bar brings it back. The ⇕ button shrinks it to the latest line. During the call it shows
+  the newest 50 lines, and **Show Earlier Lines** brings back the rest. When the call ends it
   says *Saved* and goes away; the meeting is waiting in the Wingman window. Its
   see-through look is in Settings → Live Transcript, and it's solid when Reduce
   Transparency is on.

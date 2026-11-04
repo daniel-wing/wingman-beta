@@ -462,6 +462,9 @@ struct TranscriptList<Empty: View>: View {
     private let prefs = ReadingPrefs.shared
     @State private var nearBottom = true
     @State private var follower = TranscriptFollower()
+    @State private var scroller = LiveScroller()
+    /// How many of the newest lines a live list shows (`LiveTail`).
+    @State private var tail = LiveTail.lines
     /// The lines as they were when the window started being resized: while the
     /// edge is dragged, the list only re-measures, without new text or scrolling
     /// on top. New lines appear when it's let go.
@@ -473,31 +476,42 @@ struct TranscriptList<Empty: View>: View {
         let current = matches.isEmpty ? nil : matches[min(find.current, matches.count - 1)]
         let walking = walk.lines(in: rows)
         let walkTarget = walking.isEmpty ? nil : walking[min(walk.line, walking.count - 1)].id
+        // During the call a list that isn't lazy, and scrolling that SwiftUI's
+        // layout doesn't see: `LiveTail` says why.
+        let first = live ? LiveTail.first(of: rows.count, showing: tail, all: find.shown || !walking.isEmpty) : 0
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: prefs.size * 0.75) {
-                    if rows.isEmpty { empty() }
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { offset, row in
-                        LineView(row: row, size: prefs.size, canRename: canRename, suggestions: suggestions,
-                                 highlights: matches.filter { $0.row == offset }.map(\.range),
-                                 current: current?.row == offset ? current?.range : nil,
-                                 emphasized: walk.speaker == row.speakerKey, selectable: !live, hinting: hinting,
-                                 // The list holds still while a line is being named, so
-                                 // new lines don't scroll it (and its popover) away.
-                                 hintEditing: { open in frozen = open ? self.rows : nil },
-                                 rename: { rename(row.speakerKey, $0) }, confirm: { confirm(row.speakerKey) })
-                            .id(row.id)
+                if live {
+                    VStack(alignment: .leading, spacing: prefs.size * 0.75) {
+                        if first > 0 {
+                            Button("Show Earlier Lines") {
+                                let top = rows[first].id
+                                tail += LiveTail.more
+                                DispatchQueue.main.async { proxy.scrollTo(top, anchor: .top) }
+                            }
+                            .buttonStyle(.link)
+                            .font(.callout)
+                            .frame(maxWidth: .infinity)
+                        }
+                        lines(rows, from: first, matches: matches, current: current)
                     }
-                }
-                .padding(12)
-                .modifier(OldLayoutSelection())
-            }
-            .onScrollGeometryChange(for: TranscriptFollower.Distance.self) { geometry in
-                TranscriptFollower.distance(offset: geometry.contentOffset.y, visible: geometry.containerSize.height,
-                                            content: geometry.contentSize.height)
-            } action: { _, distance in
-                follower.settle(distance) { near in
-                    if nearBottom != near { nearBottom = near }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(LiveScrollWatcher(scroller: scroller) { distance in
+                        follower.settle(distance) { near in
+                            if nearBottom != near { nearBottom = near }
+                        }
+                    } grew: {
+                        // Follow only someone already at the bottom, and not while finding or naming.
+                        guard nearBottom, !find.shown, walk.speaker == nil else { return }
+                        follower.follow("bottom") { _ in scroller.toBottom() }
+                    })
+                } else {
+                    LazyVStack(alignment: .leading, spacing: prefs.size * 0.75) {
+                        lines(rows, from: 0, matches: matches, current: current)
+                    }
+                    .padding(12)
+                    .modifier(OldLayoutSelection())
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.willStartLiveResizeNotification)) { note in
@@ -510,13 +524,8 @@ struct TranscriptList<Empty: View>: View {
             // Opened in the middle of a call (the Live Transcript brought
             // back, the call chosen in the Wingman window): start at the newest line.
             .onAppear {
-                guard live, let last = rows.last else { return }
-                follower.follow(last.id) { proxy.scrollTo($0, anchor: .bottom) }
-            }
-            .onChange(of: rows.last?.text) {
-                // Follow only someone already at the bottom, and not while finding or naming.
-                guard live, nearBottom, !find.shown, walk.speaker == nil, let last = rows.last else { return }
-                follower.follow(last.id) { proxy.scrollTo($0, anchor: .bottom) }
+                guard live else { return }
+                follower.follow("bottom") { _ in scroller.toBottom() }
             }
             .onChange(of: current) {
                 if let current { withAnimation { proxy.scrollTo(rows[current.row].id, anchor: .center) } }
@@ -525,9 +534,9 @@ struct TranscriptList<Empty: View>: View {
                 if let walkTarget { withAnimation { proxy.scrollTo(walkTarget, anchor: .center) } }
             }
             .overlay(alignment: .bottomTrailing) {
-                if live, !nearBottom, let last = rows.last {
+                if live, !nearBottom {
                     Button {
-                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                        scroller.toBottom()
                     } label: {
                         Label("Jump to Latest", systemImage: "arrow.down.circle.fill")
                     }
@@ -536,6 +545,132 @@ struct TranscriptList<Empty: View>: View {
                 }
             }
         }
+    }
+
+    private func lines(_ rows: [TranscriptRow], from first: Int, matches: [TranscriptFind.Match],
+                       current: TranscriptFind.Match?) -> some View {
+        Group {
+            if rows.isEmpty { empty() }
+            ForEach(Array(rows.enumerated().dropFirst(first)), id: \.element.id) { offset, row in
+                LineView(row: row, size: prefs.size, canRename: canRename, suggestions: suggestions,
+                         highlights: matches.filter { $0.row == offset }.map(\.range),
+                         current: current?.row == offset ? current?.range : nil,
+                         emphasized: walk.speaker == row.speakerKey, selectable: !live, hinting: hinting,
+                         // The list holds still while a line is being named, so
+                         // new lines don't scroll it (and its popover) away.
+                         hintEditing: { open in frozen = open ? self.rows : nil },
+                         rename: { rename(row.speakerKey, $0) }, confirm: { confirm(row.speakerKey) })
+                    .id(row.id)
+            }
+        }
+    }
+}
+
+/// What a live list shows. On the field Mac the live list kept hanging in two
+/// ways: on long calls while scrolling (§66), and within minutes of a call
+/// starting at 3-5 lines, about when the text first stops fitting (flat memory,
+/// main thread in `LazySubviewPlacements`, "OnScrollGeometryChange tried to
+/// update multiple times per frame"; last on 0.10.1, 2026-11-03). In a lazy
+/// stack the rows placed depend on the scroll position, the position on the
+/// content's height, and the height on the rows placed, so layout can chase
+/// itself. Not reproduced here, so the loop is taken away instead of tuned:
+/// - the list isn't lazy, so its height never depends on where it's scrolled;
+/// - it shows the newest lines, because a plain stack of hundreds re-places them
+///   all on each revision of the live line; the rest are a click away, and all
+///   of them are in the note and in the meeting afterwards;
+/// - scrolling and "am I at the bottom" go through the `NSScrollView`, outside
+///   SwiftUI's layout (`LiveScroller`).
+enum LiveTail {
+    static let lines = 50
+    static let more = 100
+
+    /// The first row shown of `count`, with `showing` lines asked for. `all`:
+    /// Find and naming speakers go through every line.
+    static func first(of count: Int, showing: Int, all: Bool) -> Int {
+        all ? 0 : max(0, count - showing)
+    }
+}
+
+/// The live list's `NSScrollView`.
+@MainActor
+final class LiveScroller {
+    weak var scrollView: NSScrollView?
+
+    func toBottom() {
+        guard let scrollView, let document = scrollView.documentView else { return }
+        let clip = scrollView.contentView
+        let end = max(0, document.frame.height - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: clip.bounds.minX, y: document.isFlipped ? end : 0))
+        scrollView.reflectScrolledClipView(clip)
+    }
+
+    var distance: TranscriptFollower.Distance? {
+        guard let scrollView, let document = scrollView.documentView else { return nil }
+        let clip = scrollView.contentView.bounds
+        let offset = document.isFlipped ? clip.minY : document.frame.height - clip.maxY
+        return TranscriptFollower.distance(offset: offset, visible: clip.height, content: document.frame.height)
+    }
+}
+
+/// Sits behind the live list and finds its scroll view. Reports from AppKit's
+/// notifications: the user scrolled (`moved`), the content got taller (`grew`).
+/// Both only schedule work (`TranscriptFollower`); nothing here runs in a layout pass.
+struct LiveScrollWatcher: NSViewRepresentable {
+    let scroller: LiveScroller
+    let moved: (TranscriptFollower.Distance) -> Void
+    let grew: () -> Void
+
+    func makeNSView(context: Context) -> WatcherView {
+        let view = WatcherView()
+        view.scroller = scroller
+        return view
+    }
+
+    func updateNSView(_ view: WatcherView, context: Context) {
+        view.moved = moved
+        view.grew = grew
+    }
+
+    final class WatcherView: NSView {
+        var scroller: LiveScroller?
+        var moved: ((TranscriptFollower.Distance) -> Void)?
+        var grew: (() -> Void)?
+        private var watching: [NSObjectProtocol] = []
+        private var height: CGFloat = 0
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            watching.forEach(NotificationCenter.default.removeObserver)
+            watching = []
+            guard window != nil, let scrollView = enclosingScrollView, let document = scrollView.documentView else { return }
+            scroller?.scrollView = scrollView
+            height = document.frame.height
+            let clip = scrollView.contentView
+            clip.postsBoundsChangedNotifications = true
+            document.postsFrameChangedNotifications = true
+            let center = NotificationCenter.default
+            watching = [
+                center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.didMove() }
+                },
+                center.addObserver(forName: NSView.frameDidChangeNotification, object: document, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.didResize() }
+                },
+            ]
+        }
+
+        private func didMove() {
+            if let distance = scroller?.distance { moved?(distance) }
+        }
+
+        private func didResize() {
+            guard let new = scroller?.scrollView?.documentView?.frame.height, new != height else { return }
+            let taller = new > height
+            height = new
+            if taller { grew?() }
+        }
+
+        deinit { watching.forEach(NotificationCenter.default.removeObserver) }
     }
 }
 

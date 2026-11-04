@@ -1,11 +1,25 @@
 # Release notes
 
+## 0.10.2 — a live transcript built to avoid freezes, and calls that survive a restart
+
+- **A live transcript built to avoid freezes:** some calls froze Wingman in their first
+  minutes, so the list you read during a call works differently now. It shows the newest
+  50 lines; **Show Earlier Lines** brings back the rest, and the full transcript is in the
+  note as always.
+- **A meeting cut off by Wingman stopping unexpectedly is finished when Wingman opens
+  again:** speakers told apart, its start time in the list, and a line in the note saying
+  where the recording ends.
+- **If Wingman restarts during a call and records it again, it goes on in the same
+  meeting** instead of starting a new one. The note marks the time that wasn't recorded.
+- **Join with Previous:** a call saved in two pieces can be joined back into one meeting,
+  transcript, audio and speakers. Wingman suggests it when two meetings look like the same
+  call; it never joins on its own. The piece that's joined goes to the Trash.
+
 ## 0.10.1 — no freeze while scrolling during a call, and finishing says how long it takes
 
 - **Fix: Wingman could freeze while you scrolled the transcript during a call**, and then
   restart in the middle of it. During the call, lines can't be selected for now; once the
   call ends you can select and copy them as before.
-
 - **After a call, Wingman says what it's doing and about how long it takes:**
   "Finishing your notes · about 40 s", with the steps ticking off (transcript, languages,
   speakers, audio). The time is learned from your earlier calls, so the first one shows

@@ -253,6 +253,9 @@ struct PastMeetingDetail: View {
                             .controlSize(.small)
                     }
                 }
+                if meeting.note.readOnly == nil {
+                    JoinWithPrevious(recorder: recorder, note: meeting.url) { await store.refresh() }
+                }
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -312,5 +315,62 @@ struct PastMeetingDetail: View {
             parts.append("An older version of Wingman changed \(untraceable.joined(separator: ", "))'s voice, so what this meeting taught can't be taken out exactly. To remove it completely, forget them in Settings → People.")
         }
         return parts.joined(separator: " ")
+    }
+}
+
+/// Join with Previous: when this meeting looks like the rest of the one before
+/// it (same calendar event or name, minutes apart), a line suggesting it;
+/// otherwise just the button, if there's a meeting before it that day. Always
+/// asked first; then what came of it.
+struct JoinWithPrevious: View {
+    let recorder: Recorder
+    let note: URL
+    var refresh: () async -> Void = {}
+    @State private var candidate: Recorder.JoinCandidate?
+    @State private var confirming = false
+    @State private var joining = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let result = recorder.joinResult, result.note == note {
+                Label(result.text, systemImage: result.ok ? "checkmark.circle" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(result.ok ? Color.secondary : Color.orange)
+                    .font(.callout)
+            }
+            if let candidate {
+                HStack {
+                    if candidate.suggested {
+                        Label("This looks like the rest of “\(candidate.title)”, which stopped at \(candidate.ended.formatted(date: .omitted, time: .shortened)).",
+                              systemImage: "arrow.triangle.merge")
+                    }
+                    Spacer()
+                    if joining { ProgressView().controlSize(.small) }
+                    Button("Join with Previous…") { confirming = true }
+                        .controlSize(.small)
+                        .disabled(joining)
+                        .help("Add this meeting's transcript and audio to the end of “\(candidate.title)”")
+                }
+                .font(.callout)
+            }
+        }
+        // Looked up again when a meeting finishes or goes (the one before may
+        // only just have been saved).
+        .task(id: "\(note.path)|\(recorder.meetings.filter { $0.stage == .done }.count)|\(recorder.joinResult?.text ?? "")") {
+            candidate = await recorder.meetingBefore(note)
+        }
+        .confirmationDialog("Join with “\(candidate?.title ?? "")” (\(candidate?.started.formatted(date: .omitted, time: .shortened) ?? ""))?",
+                            isPresented: $confirming) {
+            Button("Join") {
+                guard let candidate else { return }
+                joining = true
+                Task {
+                    _ = await recorder.join(note, onto: candidate.note)
+                    joining = false
+                    await refresh()
+                }
+            }
+        } message: {
+            Text("This meeting's transcript and audio are added after it, at the time they were recorded, with the time between them marked. This meeting's note, audio and subtitles go to the Trash, and a backup of the other note is kept.")
+        }
     }
 }

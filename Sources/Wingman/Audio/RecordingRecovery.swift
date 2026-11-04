@@ -19,6 +19,14 @@ enum RecordingRecovery {
         /// The tracks are the meeting's own separate tracks (next to the note), not scratch files.
         let tracksKept: Bool
         let started: Date
+        /// What the meeting was called and its calendar event, so the next
+        /// launch can finish it as a meeting (records from before 0.10.2 don't have them).
+        var name: String? = nil
+        var event: MeetingInfo? = nil
+        var nameFromCalendar: Bool? = nil
+        /// The call app being recorded, so a restart can tell the same call
+        /// is being recorded again (`Recorder.continueWithin`).
+        var callApp: CallApp? = nil
     }
 
     struct Outcome: Equatable {
@@ -38,6 +46,13 @@ enum RecordingRecovery {
         } catch {
             Log.write("couldn't save the recording's recovery record: \(Log.describe(error))")
         }
+    }
+
+    /// The recording a record file belongs to ("recording-<id>.json").
+    static func id(of url: URL) -> UUID? {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard name.hasPrefix("recording-") else { return nil }
+        return UUID(uuidString: String(name.dropFirst("recording-".count)))
     }
 
     static func remove(id: UUID, in folder: URL) {
@@ -85,18 +100,52 @@ enum RecordingRecovery {
         return UInt64(riff) + 8 != length
     }
 
-    /// Finishes one recording's audio. Slow (it compresses audio): run it off the main thread.
-    static func finish(_ record: Record, mix: ([URL], URL) throws -> Void = AudioMix.mix) -> Outcome {
-        let fm = FileManager.default
-        let tracks = record.tracks.filter { fm.fileExists(atPath: $0.path) }
-        var seconds = 0.0
-        for track in tracks {
+    /// Fixes the headers of a recording's tracks, so they play (and can be
+    /// read) in full. Returns how many seconds the longest one holds, or nil
+    /// when none could be read.
+    static func repair(_ tracks: [URL]) -> Double? {
+        var seconds: Double?
+        for track in tracks where FileManager.default.fileExists(atPath: track.path) {
             do {
-                if let result = try WAVRepair.repair(track) { seconds = max(seconds, result.seconds) }
+                if let result = try WAVRepair.repair(track) { seconds = max(seconds ?? 0, result.seconds) }
             } catch {
                 Log.write("couldn't repair an interrupted track: \(Log.describe(error))")
             }
         }
+        return seconds
+    }
+
+    /// The transcript lines of a note written during the call, back as lines a
+    /// meeting can finish: final, "Them" for the call, the note's marks kept.
+    /// Notes keep only when each line started, so when it ended is estimated
+    /// as in `VoiceRecovery.spans`: 0.4 s a word plus 0.8 s (1.5–15 s), never
+    /// past the next line from the same side.
+    static func lines(from note: MeetingNote, isMe: (String) -> Bool) -> [TranscriptLine] {
+        let lines = note.lines
+        return lines.enumerated().map { index, line in
+            let speaker: Speaker = isMe(line.speaker) ? .me : .them
+            let start = TimeInterval(line.start)
+            let words = line.text.split(whereSeparator: \.isWhitespace).count
+            var end = start + min(15, max(1.5, 0.4 * Double(words) + 0.8))
+            if let next = lines[(index + 1)...].first(where: { (isMe($0.speaker) ? Speaker.me : .them) == speaker }) {
+                end = min(end, max(start + 0.5, TimeInterval(next.start)))
+            }
+            var result = TranscriptLine(id: UUID(), speaker: speaker, start: start, end: end, text: line.text, isFinal: true)
+            switch line.mark {
+            case .unclear: result.confidence = 0.5
+            case .possibleEcho: result.possibleEcho = true
+            case .incomplete: result.incomplete = true
+            case nil: break
+            }
+            return result
+        }
+    }
+
+    /// Finishes one recording's audio. Slow (it compresses audio): run it off the main thread.
+    static func finish(_ record: Record, mix: ([URL], URL) throws -> Void = AudioMix.mix) -> Outcome {
+        let fm = FileManager.default
+        let tracks = record.tracks.filter { fm.fileExists(atPath: $0.path) }
+        let seconds = repair(tracks) ?? 0
         var combinedSaved = false
         let combined = record.note.deletingPathExtension().appendingPathExtension("m4a")
         if record.keepAudio, !tracks.isEmpty, fm.fileExists(atPath: record.note.deletingLastPathComponent().path) {

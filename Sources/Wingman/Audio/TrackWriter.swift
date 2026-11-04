@@ -73,6 +73,31 @@ final class TrackWriter: @unchecked Sendable {
         }
     }
 
+    /// Queues the audio of an earlier recording's track (one of Wingman's own
+    /// files), then `silence` samples: what came before a restart and the
+    /// time nothing was recorded, so the audio after it keeps the same
+    /// timeline. If the file can't be read, as much silence takes its place,
+    /// so later audio still lines up. `done` says (on the writer's queue)
+    /// whether the file's audio made it in.
+    func appendEarlier(_ file: URL?, expected: Int, silence: Int, done: @escaping @Sendable (Bool) -> Void) {
+        queue.async { [self] in
+            guard !closed else { return done(false) }
+            var samples: [Float]?
+            if let file, let data = try? Data(contentsOf: file, options: .alwaysMapped), data.count >= WAVFormat.headerSize,
+               data.prefix(WAVFormat.headerSize) == WAVFormat.header(samples: expected), (data.count - WAVFormat.headerSize) / 4 == expected {
+                samples = data.dropFirst(WAVFormat.headerSize).withUnsafeBytes { Array($0.bindMemory(to: Float.self).prefix(expected)) }
+            }
+            unwritten += samples ?? [Float](repeating: 0, count: expected)
+            unwritten += [Float](repeating: 0, count: max(0, silence))
+            if unwritten.count > Self.holdBack {
+                let ready = unwritten.count - Self.holdBack
+                write(Array(unwritten.prefix(ready)))
+                unwritten.removeFirst(ready)
+            }
+            done(samples != nil && !failed)
+        }
+    }
+
     /// Silences the latest `seconds` that haven't been written yet.
     func redact(seconds: Double) {
         queue.async { [self] in
@@ -168,6 +193,16 @@ final class WriterSlot: @unchecked Sendable {
             let old = writer
             writer = new
             return old
+        }
+    }
+
+    /// Before a recording's first audio: an earlier recording of the same call
+    /// and the gap after it (`TrackWriter.appendEarlier`). Not counted in
+    /// `appended`, which stays the time since this recording started.
+    func appendEarlier(_ file: URL?, expected: Int, silence: Int, done: @escaping @Sendable (Bool) -> Void) {
+        lock.withLock {
+            guard let writer else { return done(false) }
+            writer.appendEarlier(file, expected: expected, silence: silence, done: done)
         }
     }
 

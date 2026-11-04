@@ -258,8 +258,7 @@ final class Recorder {
         didSet { UserDefaults.standard.set(mainLanguage.rawValue, forKey: "mainLanguage") }
     }
 
-    static let notesFolder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Meeting Notes", isDirectory: true)
+    static let notesFolder = DataFolders.notes
 
     static func openNotesFolder() {
         try? createNotesFolder()
@@ -339,16 +338,21 @@ final class Recorder {
     // MARK: - Start / stop
 
     func start(for session: CallSession) async {
-        await start(meetCode: session.meetingCode)
+        await start(meetCode: session.meetingCode, app: session.app)
         if isRecording, let current {
-            current.callApp = session.app
             current.callSessionID = session.id
             current.callMeetingCode = session.meetingCode
         }
     }
 
-    func start(meetCode: String? = nil) async {
+    func start(meetCode: String? = nil, app: CallApp? = nil) async {
         guard phase == .idle, !quitting else { return }
+        var app = app
+        #if !NO_DIAGNOSTICS
+        // -WingmanTestCallApp teams: a recording started by hand counts as that
+        // app's call, to test going on after a restart without a real call.
+        if app == nil, let test = UserDefaults.standard.string(forKey: "WingmanTestCallApp") { app = CallApp(rawValue: test) }
+        #endif
         // Claim the phase before the first wait, so a second start can't run alongside.
         phase = .preparing("Checking microphone access…")
         lastError = nil
@@ -383,13 +387,23 @@ final class Recorder {
                 return
             }
 
-            let meeting = try makeMeeting(started: Date(), origin: 0, meetCode: meetCode)
+            // The same call again moments after Wingman restarted: it goes on in
+            // the meeting the restart cut off.
+            let held = app.flatMap { heldRecording(for: $0, meetCode: meetCode) }
+            let continued = try held.map { try continueMeeting($0) }
+            let meeting = try continued?.meeting ?? makeMeeting(started: Date(), origin: 0, meetCode: meetCode)
             created = meeting
             capturing = [meeting]
             current = meeting
             meetings.append(meeting)
             slots = [.me: WriterSlot(), .them: WriterSlot()]
             installWriters(for: meeting)
+            if let held, let continued { putEarlierAudio(held, tracks: continued.earlier, into: meeting) }
+            if let app {
+                // The recovery record says which app, so a restart can tell its call apart.
+                meeting.callApp = app
+                meeting.saveRecoveryRecord()
+            }
             meSink = makeStream(.me, vad: vad, mutedBy: muteFlag)
             themSink = makeStream(.them, vad: vad)
             do {
@@ -513,6 +527,15 @@ final class Recorder {
     var showMeeting: ((Meeting) -> Void)?
     /// A meeting went away (discarded, deleted, joined): stop showing it (set by the app).
     var closeMeeting: ((Meeting) -> Void)?
+    /// Show a saved meeting by its note (after a join; set by the app).
+    var showNote: ((URL) -> Void)?
+    /// What came of the last Join with Previous, shown on the meeting it's about.
+    struct JoinResult: Equatable {
+        let note: URL
+        let text: String
+        let ok: Bool
+    }
+    var joinResult: JoinResult?
     /// Whether a meeting is on screen, so it isn't forgotten (set by the app).
     var isShown: ((Meeting) -> Bool)?
     /// A new call was split off a running recording (for the notification).
@@ -528,6 +551,19 @@ final class Recorder {
     func trimDone() {
         let done = meetings.filter { $0.stage == .done && $0 !== current }
         for meeting in done.dropLast(Self.doneKept) where isShown?(meeting) != true { forget(meeting) }
+    }
+
+    /// Before a meeting's files change underneath it (a join): a done meeting
+    /// kept in memory is let go, so it's shown from its note again. False if
+    /// the note belongs to a meeting still recording or finishing.
+    func letGo(note: URL) -> Bool {
+        let held = meetings.filter { $0.currentNote.map { Self.isSameFile($0, note) || $0 == note } ?? false }
+        guard held.allSatisfy({ $0.stage == .done && $0 !== current }) else { return false }
+        for meeting in held {
+            forget(meeting)
+            closeMeeting?(meeting)
+        }
+        return true
     }
 
     private func forget(_ meeting: Meeting) {
@@ -1058,25 +1094,229 @@ final class Recorder {
             removeLeftoverScratch(olderThan: launched)
             return
         }
-        Log.write("finishing the audio of \(records.count + orphans.count) interrupted recording(s)")
-        let all = records.map(\.record) + orphans
-        let keys = Set(all.map { AudioCleanup.key(for: $0.note) })
+        // A recording whose note can be read back is finished like any meeting
+        // (speakers, languages, audio, its place in the list); otherwise only
+        // its audio is (and always for 0.8's tracks, which have no record).
+        var resumable: [(id: UUID, record: RecordingRecovery.Record, lines: [TranscriptLine])] = []
+        var audioOnly: [(url: URL?, record: RecordingRecovery.Record)] = orphans.map { (nil, $0) }
+        for (url, record) in records {
+            if let id = RecordingRecovery.id(of: url), let lines = Self.interruptedLines(record), !lines.isEmpty {
+                resumable.append((id, record, lines))
+            } else {
+                audioOnly.append((url, record))
+            }
+        }
+        Log.write("finishing \(resumable.count) interrupted recording(s) as meetings, the audio of \(audioOnly.count)")
+        let keys = Set((records.map(\.record) + orphans).map { AudioCleanup.key(for: $0.note) })
         audioInUse.formUnion(keys)
         Task {
             var recovered = 0
-            for (i, record) in all.enumerated() {
-                let outcome = await Task.detached(priority: .utility) { RecordingRecovery.finish(record) }.value
-                if i < records.count { try? FileManager.default.removeItem(at: records[i].url) }
+            for item in audioOnly {
+                let outcome = await Task.detached(priority: .utility) { RecordingRecovery.finish(item.record) }.value
+                if let url = item.url { try? FileManager.default.removeItem(at: url) }
                 Log.write(String(format: "finished an interrupted recording: %.0f s of audio, combined audio %@",
                                  outcome.seconds, outcome.combinedSaved ? "saved" : "not saved"))
                 if outcome.seconds > 0 { recovered += 1 }
             }
-            audioInUse.subtract(keys)
+            var resumed = 0
+            for item in resumable {
+                let tracks = item.record.tracks
+                let seconds = await Task.detached(priority: .utility) { RecordingRecovery.repair(tracks) ?? Self.seconds(of: tracks) }.value
+                let ended = item.record.started.addingTimeInterval(seconds)
+                // Cut off moments ago during a call: held back in case the same
+                // call is recorded again, which then goes on in this meeting.
+                if item.record.callApp != nil, Date().timeIntervalSince(ended) < Self.continueWithin {
+                    hold(Held(id: item.id, url: RecordingRecovery.recordURL(for: item.id, in: Self.scratchFolder),
+                              record: item.record, lines: item.lines, seconds: seconds, ended: ended))
+                    continue
+                }
+                let meeting = resumeInterrupted(item.record, id: item.id, lines: item.lines, seconds: seconds)
+                await meeting.waitUntilDone()
+                Log.write(String(format: "finished an interrupted recording as a meeting: %.0f s, %d lines", seconds, item.lines.count))
+                resumed += 1
+            }
+            audioInUse.subtract(keys.subtracting(held.map { AudioCleanup.key(for: $0.record.note) }))
             removeLeftoverScratch(olderThan: launched)
-            if recovered > 0, notice == nil {
-                notice = recovered == 1
+            if resumed + recovered > 0, notice == nil {
+                notice = resumed > 0
+                    ? "Wingman stopped during a meeting before it could finish. It has finished it now; the transcript ends where Wingman stopped."
+                    : recovered == 1
                     ? "Wingman stopped during a meeting before it could finish. Its audio was recovered and saved next to its note."
                     : "Wingman stopped during \(recovered) meetings before it could finish them. Their audio was recovered and saved next to their notes."
+            }
+        }
+    }
+
+    /// The lines of an interrupted recording's note, if it can be read back.
+    /// During the call the note names the other side "Them", so every other
+    /// name is you.
+    private static func interruptedLines(_ record: RecordingRecovery.Record) -> [TranscriptLine]? {
+        guard let data = try? Data(contentsOf: record.note) else { return nil }
+        let note = MeetingNote.parse(data)
+        guard note.readOnly == nil else { return nil }
+        return RecordingRecovery.lines(from: note) { $0 != Speaker.them.rawValue }
+    }
+
+    /// How long the longest of these tracks is, in seconds.
+    nonisolated static func seconds(of tracks: [URL]) -> Double {
+        tracks.compactMap { url in
+            (try? AVAudioFile(forReading: url)).map { Double($0.length) / $0.fileFormat.sampleRate }
+        }.max() ?? 0
+    }
+
+    /// An interrupted recording back as a meeting that finishes: its note,
+    /// name, calendar event and tracks, ending where Wingman stopped.
+    private func resumeInterrupted(_ record: RecordingRecovery.Record, id: UUID, lines: [TranscriptLine], seconds: Double) -> Meeting {
+        let identity = identity(of: record)
+        let lastLine = lines.map(\.end).max() ?? 0
+        let ended = record.started.addingTimeInterval(max(seconds, lastLine))
+        let meeting = Meeting(recorder: self, stage: .finishing("Finishing a meeting Wingman didn't get to finish…"), origin: 0,
+                              started: record.started, name: identity.name, event: identity.event,
+                              nameFromCalendar: identity.nameFromCalendar, base: identity.base, prefix: identity.prefix,
+                              tracksKept: record.tracksKept,
+                              meAudio: record.tracks.first { $0.lastPathComponent.hasSuffix("-me.wav") },
+                              themAudio: record.tracks.first { $0.lastPathComponent.hasSuffix("-them.wav") },
+                              recordingID: id, interrupted: (lines, ended))
+        meetings.append(meeting)
+        meeting.finish()
+        return meeting
+    }
+
+    /// An interrupted recording's note, name and calendar event. Records from
+    /// before 0.10.2 don't keep the last two: the name comes from the file and
+    /// the calendar is asked again for the start time.
+    private func identity(of record: RecordingRecovery.Record)
+        -> (base: URL, prefix: String, name: String, event: MeetingInfo?, nameFromCalendar: Bool) {
+        let base = record.note.deletingPathExtension()
+        let day = base.deletingLastPathComponent().lastPathComponent
+        let parsed = NoteNaming.parse(base: base.lastPathComponent, day: day)
+        let event = record.event ?? (record.name == nil && useCalendar ? CalendarLookup.currentMeeting(at: record.started) : nil)
+        let name = record.name ?? parsed?.name ?? NoteNaming.displayName(base: base.lastPathComponent)
+        let prefix = parsed.map { NoteNaming.prefix(day: day, number: $0.number) } ?? base.lastPathComponent
+        return (base, prefix, name, event, record.nameFromCalendar ?? (event != nil && event?.title == name))
+    }
+
+    // MARK: - Going on after a restart
+
+    /// A recording cut off by a crash or a force quit less than this long ago
+    /// goes on in the same meeting if the same call is recorded again (same
+    /// call app, same calendar event, or none for both). Owner, 2026-11-02:
+    /// one call in three pieces after two freezes.
+    nonisolated static let continueWithin: TimeInterval = 300
+
+    /// A recording held back at launch, in case its call is recorded again.
+    struct Held {
+        let id: UUID
+        /// Its recovery record.
+        let url: URL
+        let record: RecordingRecovery.Record
+        let lines: [TranscriptLine]
+        /// How much audio it has.
+        let seconds: Double
+        /// When Wingman stopped.
+        let ended: Date
+    }
+    private var held: [Held] = []
+
+    /// Holds a recording until `continueWithin` after it was cut off; if its
+    /// call isn't recorded again by then, it's finished like any interrupted one.
+    private func hold(_ item: Held) {
+        held.append(item)
+        Log.write("holding an interrupted recording for \(Int(Self.continueWithin - Date().timeIntervalSince(item.ended))) s in case its call is recorded again")
+        Task {
+            try? await Task.sleep(for: .seconds(max(1, Self.continueWithin - Date().timeIntervalSince(item.ended))))
+            releaseHeld(item.id)
+        }
+    }
+
+    /// A held recording whose call wasn't recorded again: finished on its own.
+    private func releaseHeld(_ id: UUID) {
+        guard let index = held.firstIndex(where: { $0.id == id }) else { return }
+        let item = held.remove(at: index)
+        Log.write("its call wasn't recorded again: finishing the interrupted recording on its own")
+        let meeting = resumeInterrupted(item.record, id: item.id, lines: item.lines, seconds: item.seconds)
+        Task {
+            await meeting.waitUntilDone()
+            audioInUse.remove(AudioCleanup.key(for: item.record.note))
+        }
+    }
+
+    /// The held recording of this call, if there's one: same call app, cut off
+    /// less than `continueWithin` ago, and the same calendar event (or none for both).
+    private func heldRecording(for app: CallApp, meetCode: String?) -> Held? {
+        let now = Date()
+        let event = useCalendar ? CalendarLookup.currentMeeting(at: now, meetCode: meetCode) : nil
+        guard let index = held.lastIndex(where: {
+            $0.record.callApp == app && now.timeIntervalSince($0.ended) < Self.continueWithin && $0.record.event?.id == event?.id
+        }) else { return nil }
+        return held.remove(at: index)
+    }
+
+    /// The meeting a held recording was, going on: same note, its lines, then a
+    /// gap for the time nothing was recorded. Its new tracks get the earlier
+    /// audio first (`putEarlierAudio`); kept tracks are moved aside for that,
+    /// since the new ones take their names.
+    private func continueMeeting(_ item: Held) throws -> (meeting: Meeting, earlier: [Speaker: URL]) {
+        let identity = identity(of: item.record)
+        let gap = max(0, Date().timeIntervalSince(item.ended))
+        let recordingID = UUID()
+        var earlier: [Speaker: URL] = [:]
+        for track in item.record.tracks where FileManager.default.fileExists(atPath: track.path) {
+            let speaker: Speaker = track.lastPathComponent.hasSuffix("-me.wav") ? .me : .them
+            if item.record.tracksKept {
+                let aside = track.deletingLastPathComponent().appendingPathComponent(".wingman-earlier-\(recordingID.uuidString)-\(speaker == .me ? "me" : "them").wav")
+                try FileManager.default.moveItem(at: track, to: aside)
+                earlier[speaker] = aside
+            } else {
+                earlier[speaker] = track
+            }
+        }
+        let kept = item.record.tracksKept
+        let me = kept ? Self.audioURL(identity.base, "me") : Self.scratchFile("wingman-\(recordingID.uuidString)-me.wav")
+        let them = kept ? Self.audioURL(identity.base, "them") : Self.scratchFile("wingman-\(recordingID.uuidString)-them.wav")
+        // Lines from the call land after the earlier audio and the gap.
+        let meeting = Meeting(recorder: self, stage: .recording, origin: -(item.seconds + gap), started: item.record.started,
+                              name: identity.name, event: identity.event, nameFromCalendar: identity.nameFromCalendar,
+                              base: identity.base, prefix: identity.prefix, tracksKept: kept, meAudio: me, themAudio: them,
+                              recordingID: recordingID, continuing: (item.lines, Meeting.Gap(at: item.seconds, seconds: gap)))
+        meeting.speakersUsed = !AudioDeviceMonitor.outputIsHeadphones()
+        Log.write(String(format: "the same call again %.0f s after Wingman stopped: going on in the meeting it cut off", gap))
+        return (meeting, earlier)
+    }
+
+    /// The earlier recording's audio, then silence for the gap, ahead of the
+    /// new recording's on each track. Once both are in, the earlier tracks and
+    /// record go; a track that couldn't be read is kept next to the note.
+    private func putEarlierAudio(_ item: Held, tracks: [Speaker: URL], into meeting: Meeting) {
+        let rate = Double(TrackWriter.sampleRate)
+        let total = Int(((item.seconds + max(0, -meeting.origin - item.seconds)) * rate).rounded())
+        var waiting = 2
+        var failed: [URL] = []
+        for speaker in [Speaker.me, .them] {
+            let url = tracks[speaker]
+            let size = url.flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } ?? 0
+            let samples = max(0, (size - WAVFormat.headerSize) / 4)
+            slots[speaker]?.appendEarlier(url, expected: samples, silence: total - samples) { ok in
+                Task { @MainActor in
+                    if !ok, let url { failed.append(url) }
+                    waiting -= 1
+                    guard waiting == 0 else { return }
+                    let fm = FileManager.default
+                    for url in tracks.values where !failed.contains(url) { try? fm.removeItem(at: url) }
+                    if let note = meeting.currentNote {
+                        for url in failed {
+                            let name = note.deletingPathExtension().lastPathComponent
+                                + (url.lastPathComponent.hasSuffix("-me.wav") ? "-before-restart-me.wav" : "-before-restart-them.wav")
+                            try? fm.moveItem(at: url, to: note.deletingLastPathComponent().appendingPathComponent(name))
+                        }
+                    }
+                    if !failed.isEmpty {
+                        meeting.setWarning("Some audio from before Wingman restarted couldn't be added to this meeting. It's kept next to the note.")
+                    }
+                    try? fm.removeItem(at: item.url)
+                    self.audioInUse.remove(AudioCleanup.key(for: item.record.note))
+                    Log.write("earlier audio added to the meeting that went on (\(failed.isEmpty ? "all" : "\(failed.count) track(s) not")) ")
+                }
             }
         }
     }
@@ -1417,8 +1657,7 @@ final class Recorder {
     /// Wingman's own folder for audio it only needs while working — the tracks of
     /// a meeting whose audio isn't kept, file imports, compression — so a crash
     /// can't leave meeting audio lying around: whatever is here at launch goes.
-    static let scratchFolder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Wingman/Recording", isDirectory: true)
+    static let scratchFolder = DataFolders.caches.appendingPathComponent("Recording", isDirectory: true)
 
     static func scratchFile(_ name: String) -> URL {
         let fm = FileManager.default
@@ -1437,6 +1676,7 @@ final class Recorder {
     func removeLeftoverScratch(olderThan launched: Date) {
         let inUse = Set(meetings.flatMap { [$0.meAudio, $0.themAudio] }.compactMap { $0?.standardizedFileURL })
             .union((pendingSplit?.writers.values.map(\.url) ?? []).map(\.standardizedFileURL))
+            .union(held.flatMap { $0.record.tracks + [$0.url] }.map(\.standardizedFileURL))
         let leftovers = Self.leftoverScratch(in: Self.scratchFolder, temporary: FileManager.default.temporaryDirectory,
                                              olderThan: launched, inUse: inUse)
         let fm = FileManager.default

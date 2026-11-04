@@ -93,9 +93,7 @@ final class VoiceLibrary {
     /// the list on disk matches what's shown.
     private(set) var problem: String?
 
-    nonisolated static let defaultFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Wingman", isDirectory: true)
-        .appendingPathComponent("voices.json")
+    nonisolated static let defaultFile = DataFolders.support.appendingPathComponent("voices.json")
     private let file: URL
     /// Which meeting each voice came from, also kept beside `voices.json` (as `voices-history.json`):
     /// 0.8 rewrites `voices.json` without it (it keeps the sums, so its own
@@ -243,6 +241,21 @@ final class VoiceLibrary {
         }
         guard list != people else { return true }
         return replace(with: list, failure: "Wingman couldn't delete the voices learned from that meeting")
+    }
+
+    /// After two meetings were joined: what was learned from `from` now counts
+    /// as learned from `to`, so deleting that meeting's voices takes it back.
+    @discardableResult
+    func moveContributions(from: UUID, to: UUID) -> Bool {
+        var list = people
+        for i in list.indices {
+            list[i].contributions = list[i].contributions?.map { c in
+                c.meeting == from ? Contribution(id: c.id, meeting: to, speaker: c.speaker, embedding: c.embedding,
+                                                 weight: c.weight, learned: c.learned) : c
+            }
+        }
+        guard list != people else { return true }
+        return replace(with: list, failure: "Wingman couldn't move the voices learned from the joined meeting")
     }
 
     /// Sum, voiceprint and meeting count from the contributions.
