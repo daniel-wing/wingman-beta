@@ -271,8 +271,9 @@ hide the icon behind the camera — open Wingman again from Spotlight (⌘-Space
 - **The Live Transcript** appears by itself when a recording starts: a small, slightly
   see-through window marked **LIVE** that floats above the call (also in full screen),
   with Mute, New Note and Stop at the top. It never takes the focus from your call.
-  Close it to hide it: Wingman keeps recording, and **Show Live Transcript** in the menu
-  bar brings it back. The ⇕ button shrinks it to the latest line. During the call it shows
+  Close it, minimize it or press **⌃⌥L** to hide it: Wingman keeps recording, and ⌃⌥L or
+  **Show Live Transcript** in the menu bar brings it back (change the shortcut in Settings →
+  Keyboard shortcuts). The ⇕ button shrinks it to the latest line. During the call it shows
   the newest 50 lines, and **Show Earlier Lines** brings back the rest. When the call ends it
   says *Saved* and goes away; the meeting is waiting in the Wingman window. Its
   see-through look is in Settings → Live Transcript, and it's solid when Reduce
@@ -379,8 +380,10 @@ Wingman recognizes a Meet call from what Chrome itself shows, never from the pag
   the previous note.
 - Taking AirPods in and out during a call can split the meeting into two notes.
 - Screen sharing: Wingman asks macOS to leave the Live Transcript out of what you
-  share, but some apps show it anyway. In Teams (with Accessibility on) it hides while
-  you share; with Zoom or Google Meet, close it before sharing.
+  share, but some apps show it anyway. In Teams (the desktop app, in English, with
+  Accessibility on) the Live Transcript and the Wingman window hide while you share, a
+  second or two after sharing starts; click Wingman to bring its window back. With Zoom,
+  Google Meet or Teams in a browser, press ⌃⌥L to hide the Live Transcript before sharing.
 - If Wingman freezes for 20 seconds or more during a call, it lets go of the audio so
   the call isn't disturbed; what was said until it recovers is missing from the note.
 - For meetings recorded before 0.9, finding voices in the old audio is cautious: it often

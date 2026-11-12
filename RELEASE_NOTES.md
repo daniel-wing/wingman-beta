@@ -1,5 +1,19 @@
 # Release notes
 
+## 0.10.3 — no freeze with a past meeting open, and hiding Wingman when you share
+
+- **Fix: Wingman could freeze during a call while the Wingman window showed another
+  meeting**, a past one or one split off, and sometimes when a past meeting was open.
+  Past meetings now show 150 lines at a time: **Show Earlier Lines** and **Show Later
+  Lines** bring the rest, and Find and **Name Them** go straight to their line. The full
+  transcript is in the note as always.
+- **Show or hide the Live Transcript from any app with ⌃⌥L**, so it's out of the way
+  before you share your screen. Change the shortcut in Settings → Keyboard shortcuts.
+- **The Live Transcript's yellow button works:** it hides the window and Wingman keeps
+  recording; ⌃⌥L or the menu bar brings it back.
+- **While you share your screen in Teams, the Wingman window hides too**, not only the
+  Live Transcript, and comes back when you stop. Click Wingman to bring it back sooner.
+
 ## 0.10.2 — a live transcript built to avoid freezes, and calls that survive a restart
 
 - **A live transcript built to avoid freezes:** some calls froze Wingman in their first

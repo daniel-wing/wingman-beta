@@ -7,6 +7,7 @@ struct SettingsView: View {
     let permissions: Permissions
     let shortcut: GlobalShortcut
     let muteShortcut: GlobalShortcut
+    let liveShortcut: GlobalShortcut
     /// The call-mute follower (absent in App Store builds).
     var callMute: AnyObject? = nil
     /// The updater (absent in App Store builds).
@@ -32,6 +33,9 @@ struct SettingsView: View {
                 }
                 LabeledContent("Mute or unmute Wingman") {
                     VStack(alignment: .trailing, spacing: 4) { ShortcutRecorder(shortcut: muteShortcut) }
+                }
+                LabeledContent("Show or hide the Live Transcript") {
+                    VStack(alignment: .trailing, spacing: 4) { ShortcutRecorder(shortcut: liveShortcut) }
                 }
             } header: {
                 Text("Keyboard shortcuts")
@@ -409,15 +413,15 @@ private struct LiveTranscriptSection: View {
                 }
             }
             #if !APP_STORE
-            Toggle("Hide it while I share my screen in Teams", isOn: $prefs.hideWhileSharing)
+            Toggle("Hide Wingman while I share my screen in Teams", isOn: $prefs.hideWhileSharing)
             #endif
         } header: {
             Text("Live Transcript")
         } footer: {
             #if APP_STORE
-            Text("During a call the Live Transcript floats over it. It's always solid when Reduce Transparency or Increase Contrast is on in System Settings → Accessibility → Display. Close it to hide it: Wingman keeps recording, and the menu bar brings it back.")
+            Text("During a call the Live Transcript floats over it. It's always solid when Reduce Transparency or Increase Contrast is on in System Settings → Accessibility → Display. Close it or use its shortcut to hide it: Wingman keeps recording, and the shortcut or the menu bar brings it back.")
             #else
-            Text("During a call the Live Transcript floats over it. It's always solid when Reduce Transparency or Increase Contrast is on in System Settings → Accessibility → Display. Close it to hide it: Wingman keeps recording, and the menu bar brings it back. Hiding while sharing needs Accessibility and works with Teams only; with Zoom or Meet, close it before you share.")
+            Text("During a call the Live Transcript floats over it. It's always solid when Reduce Transparency or Increase Contrast is on in System Settings → Accessibility → Display. Close it or use its shortcut to hide it: Wingman keeps recording, and the shortcut or the menu bar brings it back. While you share in Teams, the Wingman window hides too; click Wingman to bring it back. Hiding while sharing needs Accessibility and works with Teams only; with Zoom or Meet, hide it before you share.")
             #endif
         }
     }

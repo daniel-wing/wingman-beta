@@ -458,6 +458,10 @@ struct TranscriptList<Empty: View>: View {
     var live = false
     /// During the call: say who's speaking on a line.
     var hinting: LineHinting?
+    /// Not live, start at the newest lines (the Live Transcript after the call ends).
+    var opensAtEnd = false
+    /// Which window the list is in, for the hang report ("wingman", "live-transcript").
+    var place = "wingman"
     @ViewBuilder var empty: () -> Empty
     private let prefs = ReadingPrefs.shared
     @State private var nearBottom = true
@@ -469,6 +473,9 @@ struct TranscriptList<Empty: View>: View {
     /// edge is dragged, the list only re-measures, without new text or scrolling
     /// on top. New lines appear when it's let go.
     @State private var frozen: [TranscriptRow]?
+    /// Not live: the lines shown (`LineWindow`); nil until moved.
+    @State private var window: Range<Int>?
+    @State private var reportID = UUID()
 
     var body: some View {
         let rows = frozen ?? self.rows
@@ -479,6 +486,9 @@ struct TranscriptList<Empty: View>: View {
         // During the call a list that isn't lazy, and scrolling that SwiftUI's
         // layout doesn't see: `LiveTail` says why.
         let first = live ? LiveTail.first(of: rows.count, showing: tail, all: find.shown || !walking.isEmpty) : 0
+        // Otherwise a plain list of a window of lines: `LineWindow` says why.
+        let shown = live ? first..<rows.count : LineWindow.resolve(window, count: rows.count, atEnd: opensAtEnd)
+        let report = "\(place) \(live ? "live" : "not live") \(shown.count) of \(rows.count) lines"
         ScrollViewReader { proxy in
             ScrollView {
                 if live {
@@ -493,7 +503,7 @@ struct TranscriptList<Empty: View>: View {
                             .font(.callout)
                             .frame(maxWidth: .infinity)
                         }
-                        lines(rows, from: first, matches: matches, current: current)
+                        lines(rows, in: shown, matches: matches, current: current)
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -507,10 +517,31 @@ struct TranscriptList<Empty: View>: View {
                         follower.follow("bottom") { _ in scroller.toBottom() }
                     })
                 } else {
-                    LazyVStack(alignment: .leading, spacing: prefs.size * 0.75) {
-                        lines(rows, from: 0, matches: matches, current: current)
+                    VStack(alignment: .leading, spacing: prefs.size * 0.75) {
+                        if shown.lowerBound > 0 {
+                            Button("Show Earlier Lines") {
+                                let top = rows[shown.lowerBound].id
+                                window = LineWindow.earlier(shown)
+                                DispatchQueue.main.async { proxy.scrollTo(top, anchor: .top) }
+                            }
+                            .buttonStyle(.link)
+                            .font(.callout)
+                            .frame(maxWidth: .infinity)
+                        }
+                        lines(rows, in: shown, matches: matches, current: current)
+                        if shown.upperBound < rows.count {
+                            Button("Show Later Lines") {
+                                let bottom = rows[shown.upperBound - 1].id
+                                window = LineWindow.later(shown, count: rows.count)
+                                DispatchQueue.main.async { proxy.scrollTo(bottom, anchor: .bottom) }
+                            }
+                            .buttonStyle(.link)
+                            .font(.callout)
+                            .frame(maxWidth: .infinity)
+                        }
                     }
                     .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .modifier(OldLayoutSelection())
                 }
             }
@@ -524,14 +555,40 @@ struct TranscriptList<Empty: View>: View {
             // Opened in the middle of a call (the Live Transcript brought
             // back, the call chosen in the Wingman window): start at the newest line.
             .onAppear {
-                guard live else { return }
-                follower.follow("bottom") { _ in scroller.toBottom() }
+                TranscriptListsShown.set(reportID, report)
+                if live {
+                    follower.follow("bottom") { _ in scroller.toBottom() }
+                } else if opensAtEnd, let last = rows.last?.id {
+                    DispatchQueue.main.async { proxy.scrollTo(last, anchor: .bottom) }
+                }
             }
+            .onDisappear { TranscriptListsShown.set(reportID, nil) }
+            .onChange(of: report) { TranscriptListsShown.set(reportID, report) }
+            // The call just ended: a Find match being looked at stays in view;
+            // otherwise the Live Transcript shows the newest lines, where the reader was.
+            .onChange(of: live) {
+                guard !live else { return }
+                let first = LineWindow.initial(count: rows.count, atEnd: opensAtEnd)
+                if let current, rows.indices.contains(current.row) {
+                    window = LineWindow.around(current.row, first, count: rows.count)
+                    let id = rows[current.row].id
+                    DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+                } else {
+                    window = nil
+                    if opensAtEnd, let last = rows.last?.id {
+                        DispatchQueue.main.async { proxy.scrollTo(last, anchor: .bottom) }
+                    }
+                }
+            }
+            // Another meeting in the same place: back to its first window.
+            .onChange(of: rows.first?.id) { window = nil }
             .onChange(of: current) {
-                if let current { withAnimation { proxy.scrollTo(rows[current.row].id, anchor: .center) } }
+                guard let current else { return }
+                show(row: current.row, in: shown, rows: rows, proxy: proxy)
             }
             .onChange(of: walkTarget) {
-                if let walkTarget { withAnimation { proxy.scrollTo(walkTarget, anchor: .center) } }
+                guard let walkTarget, let row = rows.firstIndex(where: { $0.id == walkTarget }) else { return }
+                show(row: row, in: shown, rows: rows, proxy: proxy)
             }
             .overlay(alignment: .bottomTrailing) {
                 if live, !nearBottom {
@@ -547,11 +604,24 @@ struct TranscriptList<Empty: View>: View {
         }
     }
 
-    private func lines(_ rows: [TranscriptRow], from first: Int, matches: [TranscriptFind.Match],
+    /// Scrolls to `row` (Find, the speaker walk), first moving a window that
+    /// doesn't show it; the scroll waits for the new lines to be laid out.
+    private func show(row: Int, in shown: Range<Int>, rows: [TranscriptRow], proxy: ScrollViewProxy) {
+        guard rows.indices.contains(row) else { return }
+        let id = rows[row].id
+        if !live, !shown.contains(row) {
+            window = LineWindow.around(row, shown, count: rows.count)
+            DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+        } else {
+            withAnimation { proxy.scrollTo(id, anchor: .center) }
+        }
+    }
+
+    private func lines(_ rows: [TranscriptRow], in shown: Range<Int>, matches: [TranscriptFind.Match],
                        current: TranscriptFind.Match?) -> some View {
         Group {
             if rows.isEmpty { empty() }
-            ForEach(Array(rows.enumerated().dropFirst(first)), id: \.element.id) { offset, row in
+            ForEach(shown.map { ($0, rows[$0]) }, id: \.1.id) { offset, row in
                 LineView(row: row, size: prefs.size, canRename: canRename, suggestions: suggestions,
                          highlights: matches.filter { $0.row == offset }.map(\.range),
                          current: current?.row == offset ? current?.range : nil,
@@ -588,6 +658,75 @@ enum LiveTail {
     /// Find and naming speakers go through every line.
     static func first(of count: Int, showing: Int, all: Bool) -> Int {
         all ? 0 : max(0, count - showing)
+    }
+}
+
+/// Which lines a list that isn't the live call shows: a saved meeting, a meeting
+/// split off or chosen during a call, the Live Transcript after the call ends.
+/// That list was a `LazyVStack`, and both later field hangs were inside it
+/// (2026-11-05 on 0.10.1, 2026-11-10 on 0.10.2: 69 min, memory to 38 GB, the
+/// Wingman window on another Space). A replica on the field Mac's macOS gave the
+/// same frames at the same offsets. So it's a plain stack too, like the live list
+/// (`LiveTail`), of a window of lines: a plain stack of every line costs too much
+/// on long meetings (measured: 1,000 selectable lines, 1.3 s for a text-size change).
+/// *Show Earlier Lines* and *Show Later Lines* move the window; Find and the
+/// speaker walk move it to the line they go to.
+enum LineWindow {
+    /// Lines shown at first.
+    static let page = 150
+    /// Lines a *Show Earlier/Later Lines* click adds.
+    static let step = 100
+    /// The most shown at once: a click past it drops lines from the far end.
+    static let most = 300
+
+    /// The first window: the start of a saved meeting, or the end of a call that just ended.
+    static func initial(count: Int, atEnd: Bool) -> Range<Int> {
+        atEnd ? max(0, count - page)..<count : 0..<min(count, page)
+    }
+
+    /// `window` fitted to `count` lines, after lines came or went: nil (not moved
+    /// yet) is the first window; one that ran off the end comes back; one
+    /// smaller than a page grows when there are more lines.
+    static func resolve(_ window: Range<Int>?, count: Int, atEnd: Bool) -> Range<Int> {
+        guard let window, count > 0 else { return initial(count: count, atEnd: atEnd) }
+        let upper = min(window.upperBound, count)
+        let lower = min(window.lowerBound, upper)
+        if upper - lower < page {
+            let grown = min(count, max(upper, lower + page))
+            return max(0, min(lower, grown - page))..<grown
+        }
+        return lower..<upper
+    }
+
+    static func earlier(_ window: Range<Int>) -> Range<Int> {
+        let lower = max(0, window.lowerBound - step)
+        return lower..<min(window.upperBound, lower + most)
+    }
+
+    static func later(_ window: Range<Int>, count: Int) -> Range<Int> {
+        let upper = min(count, window.upperBound + step)
+        return max(window.lowerBound, upper - most)..<upper
+    }
+
+    /// A window that shows `row`: `window` itself if it does, otherwise a page
+    /// with `row` a third of the way down.
+    static func around(_ row: Int, _ window: Range<Int>, count: Int) -> Range<Int> {
+        guard !window.contains(row), count > 0 else { return window }
+        let lower = max(0, min(row - page / 3, count - page))
+        return lower..<min(count, lower + page)
+    }
+}
+
+/// What each transcript list on screen shows, for the watchdog's hang report
+/// (counts only): "wingman not live 150 of 812 lines".
+@MainActor
+enum TranscriptListsShown {
+    private static var entries: [UUID: String] = [:]
+
+    static func set(_ id: UUID, _ description: String?) { entries[id] = description }
+
+    static var summary: String {
+        entries.isEmpty ? "none" : entries.values.sorted().joined(separator: "; ")
     }
 }
 

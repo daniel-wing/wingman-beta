@@ -50,6 +50,12 @@ struct LivePanelState: Equatable {
         userHidden = false
     }
 
+    /// The keyboard shortcut: hides it when it's showing (also while it's
+    /// stepped aside for screen sharing), brings it back otherwise.
+    mutating func toggle() {
+        if visible { close() } else { show() }
+    }
+
     /// A while after its meeting was saved.
     mutating func savedTimeout() {
         guard ended else { return }
@@ -116,6 +122,11 @@ final class LiveModel {
 private final class LivePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    /// The yellow button hides it, like closing: Wingman lives in the menu
+    /// bar during calls, with no Dock icon to minimize it to.
+    var onMinimize: (() -> Void)?
+    override func performMiniaturize(_ sender: Any?) { onMinimize?() }
+    override func miniaturize(_ sender: Any?) { onMinimize?() }
 }
 
 /// The Live Transcript: one floating window for the call being recorded. It
@@ -132,6 +143,8 @@ final class LiveTranscriptController: NSObject, NSWindowDelegate {
     private let sharing: () -> Bool
     /// Opens the Wingman window on a meeting (set by the app).
     var openInWingman: ((UUID) -> Void)?
+    /// The show/hide shortcut as it reads (e.g. "⌃⌥L"), for the tip after hiding it.
+    var shortcutDisplay: () -> String? = { nil }
     private(set) var state = LivePanelState()
     private var panel: LivePanel?
     private var savedTimer: Task<Void, Never>?
@@ -157,7 +170,25 @@ final class LiveTranscriptController: NSObject, NSWindowDelegate {
     func show() {
         state.show()
         evaluate()
-        panel?.orderFrontRegardless()
+        // Only if `evaluate` showed it: with no meeting (the shortcut works
+        // any time) or while the screen is shared, it stays hidden.
+        if let panel, panel.isVisible { panel.orderFrontRegardless() }
+    }
+
+    /// The keyboard shortcut: hides it, or brings it back.
+    func toggle() {
+        if state.visible {
+            hideByUser(tip: false)
+        } else {
+            show()
+        }
+    }
+
+    /// The close or yellow button, or the shortcut. The recording goes on.
+    private func hideByUser(tip: Bool) {
+        if tip, recorder.isRecording { watcher.liveTranscriptClosed(shortcut: shortcutDisplay()) }
+        state.close()
+        evaluate()
     }
 
     /// Back to the top right of the screen, in case it got lost.
@@ -225,7 +256,7 @@ final class LiveTranscriptController: NSObject, NSWindowDelegate {
 
     private func makePanel() -> LivePanel {
         let panel = LivePanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: expandedHeight),
-                              styleMask: [.titled, .closable, .resizable, .nonactivatingPanel],
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .nonactivatingPanel],
                               backing: .buffered, defer: false)
         panel.identifier = NSUserInterfaceItemIdentifier("live-transcript")
         panel.title = "Live Transcript"
@@ -244,6 +275,7 @@ final class LiveTranscriptController: NSObject, NSWindowDelegate {
         #endif
         panel.minSize = NSSize(width: 340, height: Self.compactHeight)
         panel.delegate = self
+        panel.onMinimize = { [weak self] in self?.hideByUser(tip: true) }
         let background = NSVisualEffectView()
         background.material = .hudWindow
         background.blendingMode = .behindWindow
@@ -306,9 +338,7 @@ final class LiveTranscriptController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if recorder.isRecording { watcher.liveTranscriptClosed() }
-        state.close()
-        evaluate()
+        hideByUser(tip: true)
         return false
     }
 }
@@ -356,7 +386,8 @@ struct LiveTranscriptView: View {
             } else {
                 TranscriptList(rows: meeting.lines.map { TranscriptRow($0, meeting: meeting) }, canRename: false,
                                suggestions: [], rename: { _, _ in }, confirm: { _ in }, find: find, walk: walk, live: live,
-                               hinting: meeting.labelsFinal ? nil : LineHinting(meeting)) {
+                               hinting: meeting.labelsFinal ? nil : LineHinting(meeting),
+                               opensAtEnd: true, place: "live-transcript") {
                     Text(live ? "Listening…" : "")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)

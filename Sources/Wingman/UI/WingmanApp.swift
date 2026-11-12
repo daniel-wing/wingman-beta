@@ -7,7 +7,8 @@ struct WingmanApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuContent(recorder: delegate.recorder, watcher: delegate.watcher, reporter: delegate.reporter,
-                        muteShortcut: delegate.muteShortcut, live: delegate.live, openWingman: { delegate.openWingman?() },
+                        muteShortcut: delegate.muteShortcut, liveShortcut: delegate.liveShortcut, live: delegate.live,
+                        openWingman: { delegate.openWingman?() },
                         updates: delegate.updatesForUI)
         } label: {
             MenuBarLabel(delegate: delegate)
@@ -69,7 +70,7 @@ struct WingmanApp: App {
 
         Settings {
             SettingsView(recorder: delegate.recorder, watcher: delegate.watcher, permissions: delegate.permissions,
-                         shortcut: delegate.shortcut, muteShortcut: delegate.muteShortcut,
+                         shortcut: delegate.shortcut, muteShortcut: delegate.muteShortcut, liveShortcut: delegate.liveShortcut,
                          callMute: delegate.callMuteForUI, updates: delegate.updatesForUI)
                 .onAppear { WindowPresence.windowOpened() }
                 .onDisappear { WindowPresence.windowClosed() }
@@ -87,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor let watcher: CallWatcher
     @MainActor let shortcut: GlobalShortcut
     @MainActor let muteShortcut: GlobalShortcut
+    @MainActor let liveShortcut: GlobalShortcut
     @MainActor let reporter: ProblemReporter
     @MainActor let meetings: MeetingsStore
     /// What the Wingman window shows.
@@ -97,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor private var terminateSignal: DispatchSourceSignal?
     #if !APP_STORE
     @MainActor let callMute: CallMuteMonitor
+    @MainActor let curtain: SharingCurtain
     @MainActor let updates: Updates
     #endif
 
@@ -112,6 +115,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                   defaultShortcut: .default)
         muteShortcut = GlobalShortcut(id: 2, name: "Mute or unmute Wingman", defaultsKey: "muteShortcut",
                                       defaultShortcut: .defaultMute)
+        liveShortcut = GlobalShortcut(id: 3, name: "Show or hide the Live Transcript", defaultsKey: "liveShortcut",
+                                      defaultShortcut: .defaultLive)
         #if APP_STORE
         reporter = ProblemReporter(watcher: watcher, recorder: recorder, permissions: permissions, followMute: { nil })
         #else
@@ -120,7 +125,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reporter = ProblemReporter(watcher: watcher, recorder: recorder, permissions: permissions,
                                    followMute: { callMute.enabled })
         updates = Updates(recorder: recorder)
-        live = LiveTranscriptController(recorder: recorder, watcher: watcher, sharing: { callMute.screenSharing })
+        live = LiveTranscriptController(recorder: recorder, watcher: watcher,
+                                        sharing: { callMute.screenSharing })
+        curtain = SharingCurtain(recorder: recorder, sharing: { callMute.screenSharing })
         #endif
         #if APP_STORE
         live = LiveTranscriptController(recorder: recorder, watcher: watcher, sharing: { false })
@@ -163,6 +170,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         shortcut.action = { [weak self] in self?.toggleRecording() }
         muteShortcut.action = { [weak self] in self?.recorder.micMuted.toggle() }
+        liveShortcut.action = { [weak self] in self?.live.toggle() }
+        live.shortcutDisplay = { [weak self] in self?.liveShortcut.shortcut?.display }
     }
 
     /// Wingman isn't declared menu-bar-only (LSUIElement): macOS launches those
@@ -207,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ReadingPrefs.shared.watchKeys()
         #if !APP_STORE
         callMute.start()
+        curtain.start()
         #endif
         guard !Self.welcomeCompleted else {
             Task { await recorder.prepareModels() }
@@ -316,7 +326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mute.state = recorder.micMuted ? .on : .off
         menu.addItem(mute)
         if recorder.isRecording {
-            menu.addItem(NSMenuItem(title: "Show Live Transcript", action: #selector(dockShowLive), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Show Live Transcript" + (liveShortcut.shortcut.map { "  \($0.display)" } ?? ""),
+                                    action: #selector(dockShowLive), keyEquivalent: ""))
         }
         menu.addItem(NSMenuItem(title: "Open Wingman", action: #selector(dockOpenWingman), keyEquivalent: ""))
         let transcribe = NSMenuItem(title: "Transcribe a Recording…", action: #selector(dockTranscribe), keyEquivalent: "")
@@ -507,6 +518,7 @@ private struct MenuContent: View {
     let watcher: CallWatcher
     let reporter: ProblemReporter
     let muteShortcut: GlobalShortcut
+    let liveShortcut: GlobalShortcut
     let live: LiveTranscriptController
     let openWingman: () -> Void
     /// The updater (absent in App Store builds).
@@ -521,7 +533,7 @@ private struct MenuContent: View {
             }
             Button("Stop Recording") { Task { await watcher.stopRecording() } }
             Button("New Note for a New Call") { recorder.split(reason: .user, force: true) }
-            Button("Show Live Transcript") { live.show() }
+            Button("Show Live Transcript" + (liveShortcut.shortcut.map { "  \($0.display)" } ?? "")) { live.show() }
             Button("Move Live Transcript Back to the Corner") {
                 live.show()
                 live.restorePosition()

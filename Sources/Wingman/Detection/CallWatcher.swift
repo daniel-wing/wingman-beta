@@ -45,11 +45,12 @@ final class CallWatcher {
 
     /// The first time the Live Transcript is closed during a recording: the
     /// recording goes on, and here's how to bring it back.
-    func liveTranscriptClosed() {
+    func liveTranscriptClosed(shortcut: String?) {
         let key = "liveCloseTipShown"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         UserDefaults.standard.set(true, forKey: key)
-        notifier.tip("Wingman is still recording", "The Live Transcript is only hidden. Bring it back from the W in the menu bar.")
+        let back = shortcut.map { "from the W in the menu bar, or with \($0)" } ?? "from the W in the menu bar"
+        notifier.tip("Wingman is still recording", "The Live Transcript is only hidden. Bring it back \(back).")
     }
 
     init(recorder: Recorder, notifier: Notifier) {

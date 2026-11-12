@@ -23,6 +23,12 @@ struct Shortcut: Codable, Equatable {
         modifiers: NSEvent.ModifierFlags([.control, .option]).rawValue,
         key: "M")
 
+    /// Show/hide the Live Transcript: ⌃⌥L.
+    static let defaultLive = Shortcut(
+        keyCode: UInt32(kVK_ANSI_L),
+        modifiers: NSEvent.ModifierFlags([.control, .option]).rawValue,
+        key: "L")
+
     var flags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
 
     var display: String {

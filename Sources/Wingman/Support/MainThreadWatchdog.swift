@@ -27,6 +27,8 @@ final class MainThreadWatchdog: @unchecked Sendable {
         /// The Live Transcript's and the Wingman window's state: "visible", "covered", "minimized",
         /// "hidden" or "other space"; "none" without one.
         var meetingWindow = "none"
+        /// What each transcript list on screen shows (`TranscriptListsShown`).
+        var lists = "none"
     }
 
     static let releaseAudioAfter: Double = 20
@@ -94,9 +96,9 @@ final class MainThreadWatchdog: @unchecked Sendable {
         if release { releasedAudio = true }
         lock.unlock()
         if due {
-            Log.write(String(format: "main thread blocked for %.0f s — key window %@%@, meeting window %@, %d transcript lines, %@, memory %@",
+            Log.write(String(format: "main thread blocked for %.0f s — key window %@%@, meeting window %@, %d transcript lines, %@, lists %@, memory %@",
                              blocked, facts.window, facts.liveResize ? " (being resized)" : "", facts.meetingWindow, facts.lines,
-                             facts.recording ? "recording" : "not recording", Self.memoryInUse()))
+                             facts.recording ? "recording" : "not recording", facts.lists, Self.memoryInUse()))
         }
         if release {
             let stopped = AudioEmergencyStop.shared.stopAll()
@@ -138,7 +140,8 @@ final class MainThreadWatchdog: @unchecked Sendable {
         }
         return Context(window: key?.identifier?.rawValue ?? (key == nil ? "none" : "other"),
                        liveResize: NSApp.windows.contains { $0.inLiveResize }, lines: lines, recording: recording,
-                       meetingWindow: shown.isEmpty ? "none" : shown.joined(separator: ", "))
+                       meetingWindow: shown.isEmpty ? "none" : shown.joined(separator: ", "),
+                       lists: TranscriptListsShown.summary)
     }
 
     @MainActor

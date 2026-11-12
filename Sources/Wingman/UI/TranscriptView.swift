@@ -237,8 +237,14 @@ struct WingmanBanner: View {
     var isEmpty: Bool {
         !(watcher.pendingCall != nil && recorder.phase == .idle)
             && !(recorder.modelStatus != nil && recorder.phase == .idle)
-            && recorder.notice == nil && recorder.warning == nil && recorder.lastError == nil
+            && recorder.notice == nil && shownWarning == nil && recorder.lastError == nil
     }
+
+    /// During a recording the warning shows with the meeting being recorded
+    /// instead (`MeetingDetailView`). Counting it here anyway left an empty strip that came
+    /// and went above the transcript with each warning, re-laying out the list
+    /// below it; one candidate for starting the 2026-11-10 hang.
+    private var shownWarning: String? { recorder.isRecording ? nil : recorder.warning }
 
     var body: some View {
         if !isEmpty {
@@ -261,7 +267,7 @@ struct WingmanBanner: View {
                     }
                     .font(.callout)
                 }
-                Messages(notice: recorder.notice, warning: recorder.isRecording ? nil : recorder.warning,
+                Messages(notice: recorder.notice, warning: shownWarning,
                          error: recorder.lastError)
             }
             .padding(12)

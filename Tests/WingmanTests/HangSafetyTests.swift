@@ -16,6 +16,60 @@ import Testing
         #expect(LiveTail.first(of: 300, showing: 50, all: true) == 0)
     }
 
+    // MARK: Lists that aren't live (2026-11-05 and 2026-11-10 hangs)
+
+    @Test func aSavedMeetingShowsAWindowOfLines() {
+        #expect(LineWindow.initial(count: 40, atEnd: false) == 0..<40)
+        #expect(LineWindow.initial(count: 1000, atEnd: false) == 0..<150)
+        // The Live Transcript after the call: the newest lines.
+        #expect(LineWindow.initial(count: 1000, atEnd: true) == 850..<1000)
+        #expect(LineWindow.initial(count: 0, atEnd: true) == 0..<0)
+        #expect(LineWindow.resolve(nil, count: 1000, atEnd: false) == 0..<150)
+    }
+
+    @Test func earlierAndLaterMoveTheWindowWithinItsLimit() {
+        // Grows by a step, up to `most`, then drops lines from the far end.
+        #expect(LineWindow.later(0..<150, count: 1000) == 0..<250)
+        #expect(LineWindow.later(0..<250, count: 1000) == 50..<350)
+        #expect(LineWindow.later(900..<1000, count: 1000) == 900..<1000)
+        #expect(LineWindow.earlier(850..<1000) == 750..<1000)
+        #expect(LineWindow.earlier(750..<1000) == 650..<950)
+        #expect(LineWindow.earlier(0..<150) == 0..<150)
+        var window = LineWindow.initial(count: 5000, atEnd: false)
+        for _ in 0..<40 { window = LineWindow.later(window, count: 5000) }
+        #expect(window.count <= LineWindow.most)
+        #expect(window.upperBound == 4150)
+    }
+
+    @Test func findAndTheSpeakerWalkMoveTheWindowToTheirLine() {
+        // Already shown: unchanged.
+        #expect(LineWindow.around(100, 0..<150, count: 1000) == 0..<150)
+        // Not shown: a page with the line a third of the way down.
+        #expect(LineWindow.around(600, 0..<150, count: 1000) == 550..<700)
+        #expect(LineWindow.around(990, 0..<150, count: 1000) == 850..<1000)
+        #expect(LineWindow.around(10, 850..<1000, count: 1000) == 0..<150)
+    }
+
+    @Test func theWindowFollowsLinesComingAndGoing() {
+        // Fewer lines than the window (lines joined, a meeting finished shorter).
+        #expect(LineWindow.resolve(850..<1000, count: 500, atEnd: false) == 350..<500)
+        // A small meeting that got longer shows a full page.
+        #expect(LineWindow.resolve(0..<40, count: 400, atEnd: false) == 0..<150)
+        #expect(LineWindow.resolve(0..<40, count: 0, atEnd: false) == 0..<0)
+        #expect(LineWindow.resolve(200..<500, count: 1000, atEnd: false) == 200..<500)
+    }
+
+    @MainActor @Test func theHangReportSaysWhatEachListShows() {
+        let saved = UUID(), panel = UUID()
+        #expect(TranscriptListsShown.summary == "none")
+        TranscriptListsShown.set(saved, "wingman not live 150 of 812 lines")
+        TranscriptListsShown.set(panel, "live-transcript live 50 of 188 lines")
+        #expect(TranscriptListsShown.summary == "live-transcript live 50 of 188 lines; wingman not live 150 of 812 lines")
+        TranscriptListsShown.set(saved, nil)
+        TranscriptListsShown.set(panel, nil)
+        #expect(TranscriptListsShown.summary == "none")
+    }
+
     @Test func distanceHasADeadBand() {
         // 500 pt visible of 2000 pt of content.
         func at(_ below: CGFloat) -> TranscriptFollower.Distance {

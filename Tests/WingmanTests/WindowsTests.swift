@@ -137,6 +137,23 @@ import Testing
         #expect(!state.visible, "nothing to show")
     }
 
+    @Test func liveTranscriptShortcutHidesAndBringsItBack() {
+        var state = LivePanelState()
+        state.toggle()
+        #expect(!state.visible, "nothing recording: nothing to show")
+        let call = UUID(), next = UUID()
+        state.current(call)
+        state.toggle()
+        #expect(!state.visible && state.meeting == call, "hidden; the recording goes on")
+        state.current(next)
+        #expect(!state.visible, "stays hidden through a split, like closing it")
+        state.toggle()
+        #expect(state.visible && state.meeting == next, "and the shortcut brings it back")
+        state.current(nil)
+        state.toggle()
+        #expect(state == LivePanelState(), "after the call, hiding it is the end of it")
+    }
+
     @Test func liveTranscriptOpacityStaysReadable() {
         #expect(LiveLook.alpha(setting: 0.85, reduceTransparency: false, increaseContrast: false) == 0.85)
         #expect(LiveLook.alpha(setting: 0.2, reduceTransparency: false, increaseContrast: false) == 0.6)

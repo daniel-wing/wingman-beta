@@ -913,8 +913,29 @@ final class Meeting: Identifiable {
                 try? await Task.sleep(for: .seconds(6))
             }
             finishStep = nil
+            stressNaming()
             stage = .done
         }
+    }
+
+    /// `-WingmanStressNaming YES`: the stress call ends with three voices and
+    /// invitees and one voice left to name, as on the field Mac on 2026-11-05.
+    private func stressNaming() {
+        guard UserDefaults.standard.bool(forKey: "WingmanStressNaming") else { return }
+        var voice = 0
+        lines = lines.map { line in
+            var line = line
+            line.isFinal = true
+            if line.speaker == .them {
+                voice = voice % 3 + 1
+                line.voice = voice
+            }
+            return line
+        }
+        meeting = MeetingInfo(id: "stress", title: "Stress test", start: Date(), end: Date(), organizer: "Person Organizer",
+                              attendees: (1...23).map { "Person \($0) Testing" }, link: nil)
+        speakerNames = ["Them 1": "Person Named One", "Them 2": "Person Named Two"]
+        labelsFinal = true
     }
     #endif
 
